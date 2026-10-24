@@ -1,3 +1,5 @@
+import os from "node:os";
+import path from "node:path";
 import "dotenv/config";
 
 /** Kept for backwards compatibility with the README/extension defaults. */
@@ -60,6 +62,8 @@ export const config = {
   // Browser
   headless: bool("HEADLESS", true),
   profileRoot: optionalStr("PROFILE_ROOT"),
+  /** Where learned state (budget, generated-config registry) is persisted. */
+  dataRoot: str("DATA_DIR", path.join(os.homedir(), ".web-agents-to")),
   userAgent: str(
     "USER_AGENT",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -87,6 +91,8 @@ export const config = {
   providerRetryDelayMs: int("PROVIDER_RETRY_DELAY_MS", 2_000, 0),
   maxQueue: int("MAX_QUEUE", 16, 0),
   maxPromptChars: int("MAX_PROMPT_CHARS", 120_000, 1_000),
+  /** Upper bound for automatic growth of the prompt budget. */
+  maxPromptCharsCeiling: int("MAX_PROMPT_CHARS_CEILING", 400_000, 1_000),
   /** Let the server translate `<tool_call>` blocks into native `tool_calls`. */
   nativeTools: bool("NATIVE_TOOLS", true),
 

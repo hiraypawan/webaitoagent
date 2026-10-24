@@ -64,6 +64,7 @@ export interface ChatCompletionRequest {
   user?: string;
   tools?: OpenAITool[];
   tool_choice?: unknown;
+  response_format?: { type?: string; json_schema?: unknown };
   stream_options?: { include_usage?: boolean };
   /** Unknown fields from callers are preserved, never forwarded blindly to the site. */
   [key: string]: unknown;

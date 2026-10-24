@@ -22,6 +22,7 @@ import {
   buildPrompt,
   conversationKey,
 } from "../core/prompt.js";
+import { contextBudget } from "../core/budget.js";
 import { recordRequest, recordTrim } from "../core/context-stats.js";
 import { DeltaTracker, stripBaseline } from "../core/stream.js";
 import { newId, nowSeconds, sleep } from "../core/utils.js";
@@ -341,16 +342,32 @@ export class BrowserChatProvider implements Provider {
     if (isNewConversation) await this.startNewChat(page);
 
     recordRequest();
+    const budget = contextBudget(this.bm.dataRoot());
     const promptOptions = {
       tools: req.tools,
       toolChoice: req.tool_choice,
-      maxChars: this.opts.maxPromptChars,
+      jsonMode: req.response_format?.type === "json_object",
+      maxChars: budget.chars(),
       onTrim: (info: { dropped: number; max: number }) => {
         recordTrim(info.dropped);
-        log.warn(
-          `[${this.id}] history trimmed: dropped ${info.dropped} characters ` +
-            `to fit the ${info.max}-character browser budget`
-        );
+        const growth = budget.onTrim(info.dropped);
+        if (growth.grown) {
+          log.warn(
+            `[${this.id}] history trimmed: dropped ${info.dropped} characters. ` +
+              `Raised the browser budget from ${growth.from} to ${growth.to} characters automatically.`
+          );
+          for (const file of growth.updatedConfigs) {
+            log.warn(
+              `[${this.id}] updated ${file} (limit.context) — restart opencode to pick up the larger window`
+            );
+          }
+        } else {
+          log.warn(
+            `[${this.id}] history trimmed: dropped ${info.dropped} characters ` +
+              `to fit the ${info.max}-character browser budget (automatic growth paused; ` +
+              `raise MAX_PROMPT_CHARS if answers keep losing context)`
+          );
+        }
       },
     };
     const prompt = isNewConversation
@@ -450,6 +467,9 @@ export class BrowserChatProvider implements Provider {
     if (tracker.hasDiverged) {
       log.warn(`[${this.id}] answer was re-rendered mid-stream; output may be incomplete`);
     }
+
+    // The request completed at the current budget: growth is allowed again.
+    budget.onSuccess();
 
     yield this.makeChunk(id, created, model, {}, "stop");
   }

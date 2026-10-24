@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.5.0
+
+Two things are now automatic: growing the prompt budget, and keeping opencode in
+sync with it.
+
+### Changed
+- **Automatic budget growth.** When a request has to drop history, the server
+  raises the browser budget by 25% (min +10k characters), persists the learned
+  size in `~/.web-agents-to/context-budget.json`, and rewrites `limit.context` in
+  every `opencode.json` that `WEB setup` generated. No more editing
+  `MAX_PROMPT_CHARS` and re-running `WEB setup --force`.
+  - Bounded by the new `MAX_PROMPT_CHARS_CEILING` (default 400 000).
+  - Growth stops once a larger size still gets trimmed — the site will not take
+    more — and the log says so instead of looping.
+  - `/status.context` reports `configuredChars`, `ceilingChars`, `growthSteps`
+    and `autoGrown`; `/v1/models` advertises the effective `context_length`;
+    `WEB doctor` shows the budget row.
+
+### Added (opencode compatibility)
+- Model-name tolerance: bare ids, `provider/model`, our config label
+  (`web-agents-to/mimo-v2.6-pro`), and any capitalisation all resolve.
+- `stop` and `max_tokens`/`max_completion_tokens` are honoured, including stop
+  sequences split across stream chunks; `finish_reason: "length"` when cut.
+- `response_format: {type: "json_object"}` adds a bare-JSON instruction to both
+  prompt builders.
+- `parallel_tool_calls`, `seed`, penalties and `reasoning_effort` are accepted
+  and ignored; `n > 1` is rejected with a clear message.
+- 34 new tests: budget growth/ceiling/persistence/config-sync, stop and token
+  limits, model aliases, and the compatibility surface end to end.
+
 ## 1.4.0
 
 More tools, and a `bash` tool that no longer dies on Windows.

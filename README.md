@@ -257,8 +257,20 @@ must not disagree:
 | `MAX_PROMPT_CHARS` (default `120000`) | `.env` | hard cap the bridge will send |
 
 `WEB setup` declares 90% of the real budget (120k chars → 27k tokens) so opencode
-compacts *before* anything has to be cut. If a client ignores the declared size
-and sends more anyway, the bridge drops the middle of the prompt and says so:
+compacts *before* anything has to be cut.
+
+**If trimming does happen anyway, the server fixes it itself.** No editing `.env`,
+no `WEB setup --force`:
+
+1. the budget grows by 25% (minimum +10k characters),
+2. the new size is remembered in `~/.web-agents-to/context-budget.json`,
+3. every `opencode.json` that `WEB setup` generated is rewritten with the new
+   `limit.context`, so the next opencode start uses the bigger window,
+4. growth stops at `MAX_PROMPT_CHARS_CEILING` (default 400 000), or when a larger
+   size still gets trimmed — that means the site will not take more, and the log
+   says so.
+
+The trimmed prompt itself is still reported:
 
 ```
 [mimo] history trimmed: dropped 48000 characters to fit the 120000-character browser budget
@@ -271,6 +283,23 @@ instead of mysterious:
 "context": { "requests": 42, "trimmed": 3, "droppedChars": 91000,
              "lastTrimAt": "2026-10-24T09:12:03.114Z", "budgetChars": 120000 }
 ```
+
+## Using MiMo from opencode
+
+The server speaks the OpenAI wire format that opencode expects, including the parts
+clients actually rely on:
+
+| Feature | Behaviour |
+|---|---|
+| Model names | `mimo-v2.6-pro`, `mimo/mimo-v2.6-pro`, `web-agents-to/mimo-v2.6-pro` and any capitalisation all resolve |
+| Tool calls | native `tool_calls` deltas, `finish_reason: "tool_calls"`, `tool_choice` incl. a forced tool |
+| `stop` | honoured, including sequences split across stream chunks |
+| `max_tokens` / `max_completion_tokens` | honoured; `finish_reason: "length"` when it cuts |
+| `response_format: {type:"json_object"}` | adds a "reply with bare JSON" instruction to the prompt |
+| `stream_options.include_usage` | emits a usage frame |
+| `temperature`, `top_p`, `seed`, penalties | accepted and ignored (the page has no such controls) |
+| `n > 1` | rejected with a clear message (one answer per request) |
+| Unknown fields | ignored rather than rejected, so client upgrades do not break the bridge |
 
 ## Configuration
 

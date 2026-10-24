@@ -1,9 +1,12 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import { timingSafeEqual } from "node:crypto";
+import path from "node:path";
 import { z } from "zod";
 import { config } from "../config/index.js";
+import { contextBudget } from "../core/budget.js";
 import { contextStats, contextTokensFor } from "../core/context-stats.js";
+import { createOutputGate, gateOptions } from "../core/output-gate.js";
 import { PlaywrightBrowserManager } from "../browser/manager.js";
 import { createProviders } from "../providers/registry.js";
 import { RequestAbortedError, ValidationError, toErrorBody } from "../core/errors.js";
@@ -42,7 +45,19 @@ const chatRequestSchema = z.object({
   user: z.string().optional(),
   tools: z.array(z.unknown()).optional(),
   tool_choice: z.unknown().optional(),
+  parallel_tool_calls: z.boolean().optional(),
+  response_format: z
+    .object({ type: z.string().optional(), json_schema: z.unknown().optional() })
+    .optional(),
+  n: z.number().int().optional(),
+  seed: z.number().optional(),
+  presence_penalty: z.number().optional(),
+  frequency_penalty: z.number().optional(),
+  reasoning_effort: z.string().optional(),
 });
+
+/** Parameters the page cannot honour; accepted so clients never error on them. */
+const IGNORED_FIELDS = ["temperature", "top_p", "seed", "presence_penalty", "frequency_penalty", "reasoning_effort"] as const;
 
 const loginSchema = z.object({ provider: z.string().min(1).optional() }).optional();
 
@@ -104,7 +119,7 @@ export async function createServer(options: ServerOptions = {}): Promise<BuiltSe
   const bm =
     options.browser ??
     new PlaywrightBrowserManager({
-      userDataRoot: config.profileRoot,
+      userDataRoot: config.profileRoot ?? path.join(config.dataRoot, "profiles"),
       headless: options.headless ?? config.headless,
       userAgent: config.userAgent,
       executablePath: config.chromiumExecutable,
@@ -135,7 +150,17 @@ export async function createServer(options: ServerOptions = {}): Promise<BuiltSe
   app.get("/status", async () => ({
     ok: true,
     version: VERSION,
-    context: contextStats(config.maxPromptChars),
+    context: await (async () => {
+      const budget = contextBudget(bm.dataRoot());
+      const learned = budget.status();
+      return {
+        ...contextStats(budget.chars()),
+        configuredChars: learned.configuredChars,
+        ceilingChars: learned.ceilingChars,
+        growthSteps: learned.growthSteps,
+        autoGrown: learned.budgetChars > learned.configuredChars,
+      };
+    })(),
     headless: options.headless ?? config.headless,
     providers: await Promise.all(
       providers.map(async (provider) => ({
@@ -157,7 +182,7 @@ export async function createServer(options: ServerOptions = {}): Promise<BuiltSe
           owned_by: model.owned_by,
           provider: provider.id,
           // Some clients size their own context window from this.
-          context_length: contextTokensFor(config.maxPromptChars),
+          context_length: contextTokensFor(contextBudget(bm.dataRoot()).chars()),
         }))
       ),
     };
@@ -174,6 +199,15 @@ export async function createServer(options: ServerOptions = {}): Promise<BuiltSe
     }
 
     const body = parsed.data as ChatCompletionRequest;
+    if (body.n !== undefined && body.n !== 1) {
+      throw new ValidationError("n > 1 is not supported: the web chat produces one answer per request");
+    }
+
+    const ignored = IGNORED_FIELDS.filter((field) => body[field] !== undefined);
+    if (ignored.length > 0) {
+      request.log.debug(`ignoring parameters the web chat cannot honour: ${ignored.join(", ")}`);
+    }
+
     const requestedModel = body.model ?? defaultModel;
     const { provider, model } = resolveModel(requestedModel, providers, providerMap);
     const chatRequest: ChatCompletionRequest = { ...body, model };
@@ -288,21 +322,54 @@ function isAuthorized(header: unknown): boolean {
   return safeEqual(bearerToken(header), config.apiKey);
 }
 
+/**
+ * Resolve whatever the client sent into a provider + model id.
+ *
+ * Clients are inconsistent: opencode may send the configured key
+ * (`mimo-v2.6-pro`), a provider-prefixed id (`mimo/mimo-v2.6-pro`), the label
+ * from our generated config (`web-agents-to/mimo-v2.6-pro`) or a different
+ * case. All of those must work, or the model looks broken from opencode.
+ */
 export function resolveModel(
   requested: string,
   providers: Provider[],
   providerMap: Map<string, Provider>
 ): { provider: Provider; model: string } {
-  const [maybeProvider, ...rest] = requested.split("/");
-  const provider = providerMap.get(maybeProvider!);
-  if (provider) {
-    const modelId = rest.join("/");
-    if (!modelId) return { provider, model: provider.models[0]!.id };
-    return { provider, model: modelId };
+  const raw = requested.trim();
+  const all = providers.flatMap((provider) =>
+    provider.models.map((model) => ({ provider, model: model.id }))
+  );
+
+  // A provider we know, optionally followed by a model.
+  const [head, ...rest] = raw.split("/");
+  const knownProvider = providerMap.get(head!) ?? providerMap.get(head!.toLowerCase());
+  const restId = rest.join("/");
+  if (knownProvider) {
+    if (!restId) return { provider: knownProvider, model: knownProvider.models[0]!.id };
+    const match =
+      knownProvider.models.find((model) => model.id === restId) ??
+      knownProvider.models.find((model) => model.id.toLowerCase() === restId.toLowerCase());
+    return { provider: knownProvider, model: match?.id ?? restId };
   }
 
-  const byModel = providers.find((candidate) => candidate.models.some((model) => model.id === requested));
-  if (byModel) return { provider: byModel, model: requested };
+  // Exact model id.
+  const exact = all.find((entry) => entry.model === raw);
+  if (exact) return exact;
+
+  // Provider label we generated (e.g. `web-agents-to`) or any unknown prefix:
+  // fall back to matching the model part.
+  if (restId) {
+    const bySuffix = all.find((entry) => entry.model === restId);
+    if (bySuffix) return bySuffix;
+  }
+
+  // Case-insensitive, with or without a prefix.
+  const lower = raw.toLowerCase();
+  const insensitive =
+    all.find((entry) => entry.model.toLowerCase() === lower) ??
+    all.find((entry) => `${entry.provider.id}/${entry.model}`.toLowerCase() === lower) ??
+    all.find((entry) => restId && entry.model.toLowerCase() === restId.toLowerCase());
+  if (insensitive) return insensitive;
 
   throw new ValidationError(
     `unknown model "${requested}". Try one of: ${providers
@@ -332,6 +399,7 @@ async function streamCompletion(
   const allowedTools = toolNamesFromTools(request.tools);
   const toolSchemas = toolSchemasFromTools(request.tools);
 
+  const gate = createOutputGate(gateOptions(request));
   let streamed = "";
   let id = newId("chatcmpl");
   let created = Math.floor(Date.now() / 1000);
@@ -364,7 +432,7 @@ async function streamCompletion(
     roleSent = true;
   };
 
-  const writeFinish = (reason: "stop" | "tool_calls") => {
+  const writeFinish = (reason: "stop" | "tool_calls" | "length") => {
     // A dedicated finish frame: clients (and opencode's parser) reject any
     // content delta that arrives after a finish_reason.
     reply.raw.write(
@@ -388,30 +456,23 @@ async function streamCompletion(
       if (!delta) continue;
 
       if (!suppressor) {
-        streamed += delta;
-        reply.raw.write(
-          encodeSSE({
-            ...chunk,
-            model: requestedModel,
-            choices: [
-              {
-                index: 0,
-                delta: roleSent ? { content: delta } : { role: "assistant", content: delta },
-                finish_reason: null,
-              },
-            ],
-          })
-        );
-        roleSent = true;
+        const out = gate.push(delta);
+        if (out) writeText(out);
+        if (gate.done) break;
         continue;
       }
 
-      writeText(suppressor.push(delta));
+      const emitted = gate.push(suppressor.push(delta));
+      writeText(emitted);
+      if (gate.done) break;
     }
+
+    const tail = gate.finish();
+    if (tail) writeText(tail);
 
     if (!suppressor) {
       // Plain text path: deltas above, terminator here.
-      writeFinish("stop");
+      writeFinish(gate.reason === "length" ? "length" : "stop");
     } else {
       writeText(suppressor.finish());
 
@@ -448,7 +509,7 @@ async function streamCompletion(
             "\n[tool call was incomplete — the block was not closed. Reply again with one complete block.]"
           );
         }
-        writeFinish("stop");
+        writeFinish(gate.reason === "length" ? "length" : "stop");
       }
     }
 
@@ -530,6 +591,10 @@ async function collectCompletion(
       })
     : { calls: [], dropped: [] };
 
+  const gate = createOutputGate(gateOptions(request));
+  const gatedText = `${gate.push(content)}${gate.finish()}`;
+  const finishReason: "stop" | "length" = gate.reason === "length" ? "length" : "stop";
+
   const promptTokens = countPromptTokens(request.messages as ChatMessage[]);
   const usage = (text: string) => {
     const completionTokens = estimateTokens(text);
@@ -551,7 +616,7 @@ async function collectCompletion(
           index: 0,
           message: {
             role: "assistant" as const,
-            content: stripToolCalls(content) || null,
+            content: stripToolCalls(gatedText) || null,
             tool_calls: toOpenAIToolCalls(calls),
           },
           finish_reason: "tool_calls" as const,
@@ -561,7 +626,8 @@ async function collectCompletion(
     };
   }
 
-  const prose = dropped.length > 0 ? `${stripToolCalls(content)}${toolDropNote(dropped)}` : content;
+  const prose =
+    dropped.length > 0 ? `${stripToolCalls(gatedText)}${toolDropNote(dropped)}` : gatedText;
   return {
     id,
     object: "chat.completion" as const,
@@ -571,9 +637,9 @@ async function collectCompletion(
       {
         index: 0,
         message: { role: "assistant" as const, content: prose },
-        finish_reason: "stop" as const,
+        finish_reason: finishReason,
       },
     ],
-    usage: usage(content),
+    usage: usage(prose),
   };
 }

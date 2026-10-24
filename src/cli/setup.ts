@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { config } from "../config/index.js";
+import { registerOpencodeConfig } from "../core/opencode-configs.js";
 import { baseUrl, ensureServer, health, listModels } from "./client.js";
 import {
   buildOpencodeConfig,
@@ -122,6 +123,8 @@ async function main(): Promise<void> {
     const result = writeOpencodeConfig(targetDir, opencodeConfig, { force: values.force });
     let step: StepResult;
     if (result.written) {
+      // Remember the file so a runtime budget change updates limit.context here.
+      registerOpencodeConfig(result.path, config.dataRoot);
       step = { title: "opencode config", state: "ok", detail: result.path };
     } else {
       step = {
