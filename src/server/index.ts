@@ -18,12 +18,19 @@ import {
   toOpenAIToolCalls,
   ToolCallSuppressor,
   toolNamesFromTools,
+  exampleCall,
+  hasUnclosedToolCall,
   toolSchemasFromTools,
   type ParsedToolCall,
 } from "../core/toolcalls.js";
 import { countPromptTokens } from "../core/prompt.js";
 import { VERSION } from "../core/version.js";
-import type { ChatCompletionRequest, ChatMessage, Provider } from "../core/types.js";
+import type {
+  ChatCompletionRequest,
+  ChatMessage,
+  OpenAITool,
+  Provider,
+} from "../core/types.js";
 
 const messageSchema = z.object({
   role: z.enum(["system", "user", "assistant", "tool"]),
@@ -476,7 +483,7 @@ async function streamCompletion(
     } else {
       writeText(suppressor.finish());
 
-      const { calls, dropped } = parseToolCallsDetailed(suppressor.fullText, {
+      const { calls, dropped, placeholders } = parseToolCallsDetailed(suppressor.fullText, {
         allowedTools,
         toolSchemas,
       });
@@ -502,8 +509,10 @@ async function streamCompletion(
         writeFinish("tool_calls");
       } else {
         if (dropped.length > 0) {
-          writeText(toolDropNote(dropped));
-        } else if (/<tool_call[\s>]/i.test(suppressor.fullText)) {
+          writeText(toolDropNote(dropped, request.tools));
+        } else if (placeholders > 0) {
+          writeText(placeholderNote(request.tools));
+        } else if (hasUnclosedToolCall(suppressor.fullText)) {
           // Truncated block: no closing tag, so nothing can be executed.
           writeText(
             "\n[tool call was incomplete — the block was not closed. Reply again with one complete block.]"
@@ -559,22 +568,55 @@ function toToolCallDelta(call: ParsedToolCall, index: number) {
 }
 
 /**
+ * The reply was a copy of an example (a placeholder name), so nothing ran.
+ * Say what to send instead — with a real tool and real arguments.
+ */
+function placeholderNote(tools?: OpenAITool[]): string {
+  const example = exampleCall(tools);
+  const names = (tools ?? []).map((tool) => tool?.function?.name).filter(Boolean);
+  const lines = [
+    "\n[that tool call used a placeholder name (like \"…\" or \"TOOL_NAME\"), so nothing ran.",
+  ];
+  if (names.length > 0) lines.push(`Use a declared tool: ${names.join(", ")}.`);
+  if (example) {
+    lines.push(
+      `<tool_call name="${example.name}">${JSON.stringify(example.arguments)}</tool_call>`
+    );
+  }
+  lines.push("]");
+  return lines.join("\n");
+}
+
+/**
  * Surface a rejected tool call to the model instead of failing the whole step.
  *
  * The message shows the offending text and the exact shape we accept: a model
  * that used the wrong markup can only fix it if it is told what it wrote.
  */
-function toolDropNote(dropped: ParsedToolCall[]): string {
+function toolDropNote(dropped: ParsedToolCall[], tools?: OpenAITool[]): string {
   const details = dropped
     .slice(0, 2)
-    .map((call) => `${call.name}: ${call.parseError ?? "invalid tool call"}`)
+    .map((call) => {
+      const name = call.name && call.name !== "(unknown)" ? `${call.name}: ` : "";
+      return `${name}${call.parseError ?? "invalid tool call"}`;
+    })
     .join("; ");
-  const example = dropped[0]?.name && dropped[0].name !== "(unknown)" ? dropped[0].name : "bash";
-  return (
-    `\n[tool call could not be read — ${details}.\n` +
-    `Send it again in exactly this form, one block, nothing else:\n` +
-    `<tool_call name="${example}">{"command": "dir"}</tool_call>]`
-  );
+
+  const example = exampleCall(tools);
+  const names = (tools ?? []).map((tool) => tool?.function?.name).filter(Boolean);
+
+  const lines = [`\n[tool call could not be read — ${details}.`];
+  if (names.length > 0) lines.push(`Declared tools: ${names.join(", ")}.`);
+  if (example) {
+    lines.push(
+      "Send it again as one block and nothing else:",
+      `<tool_call name="${example.name}">${JSON.stringify(example.arguments)}</tool_call>`
+    );
+  } else {
+    lines.push("Send one <tool_call name=\"TOOL\">{json}</tool_call> block using a declared tool.");
+  }
+  lines.push("]");
+  return lines.join("\n");
 }
 
 async function collectCompletion(
@@ -594,12 +636,12 @@ async function collectCompletion(
   }
 
   const toolsEnabled = Boolean(config.nativeTools && request.tools?.length);
-  const { calls, dropped } = toolsEnabled
+  const { calls, dropped, placeholders } = toolsEnabled
     ? parseToolCallsDetailed(content, {
         allowedTools: toolNamesFromTools(request.tools),
         toolSchemas: toolSchemasFromTools(request.tools),
       })
-    : { calls: [], dropped: [] };
+    : { calls: [], dropped: [], placeholders: 0 };
 
   const gate = createOutputGate(gateOptions(request));
   const gatedText = `${gate.push(content)}${gate.finish()}`;
@@ -636,8 +678,13 @@ async function collectCompletion(
     };
   }
 
-  const prose =
-    dropped.length > 0 ? `${stripToolCalls(gatedText)}${toolDropNote(dropped)}` : gatedText;
+  const note =
+    dropped.length > 0
+      ? toolDropNote(dropped, request.tools)
+      : placeholders > 0
+        ? placeholderNote(request.tools)
+        : "";
+  const prose = note ? `${stripToolCalls(gatedText)}${note}` : gatedText;
   return {
     id,
     object: "chat.completion" as const,

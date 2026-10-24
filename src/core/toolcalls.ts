@@ -24,6 +24,8 @@ export interface ToolCallParseResult {
   calls: ParsedToolCall[];
   /** Calls that were recognised but cannot be executed safely. */
   dropped: ParsedToolCall[];
+  /** Blocks ignored because the name was a template (`…`, `TOOL_NAME`, ...). */
+  placeholders: number;
 }
 
 /** Any `<tool_call ...>...</tool_call>` block, attributes or not. */
@@ -86,11 +88,36 @@ const PLACEHOLDER_NAMES = new Set([
   "tool",
   "tool_name",
   "toolname",
+  "tool-name",
   "your_tool",
+  "your_tool_name",
   "toolname_here",
+  "tool_name_here",
   "function",
   "example",
+  "…",
+  "...",
+  "«tool»",
 ]);
+
+/**
+ * A name that came from our own instructions rather than from the model's
+ * intent. This matters: an error message containing `name="…"` gets copied back
+ * verbatim by the model, and then every retry is "unknown tool …" — an endless
+ * loop that looks like the tool is broken.
+ */
+export function isPlaceholderName(name: string): boolean {
+  const bare = name
+    .trim()
+    .replace(/^[<"'`]+|[>"'`]+$/g, "")
+    .replace(/[.:;,]+$/g, "")
+    .trim();
+  if (!bare) return true;
+  // Only punctuation or ellipsis: a template, not a tool.
+  if (!/[a-zA-Z\u4e00-\u9fff]/.test(bare)) return true;
+  if (PLACEHOLDER_NAMES.has(bare.toLowerCase())) return true;
+  return /^(?:your|my)_|_here$|^tool[-_ ]?name$|^<.*>$/.test(bare.toLowerCase());
+}
 
 const PARAM_ALIASES: Record<string, string[]> = {
   command: ["cmd", "script", "shell_command", "command_line"],
@@ -119,13 +146,14 @@ export function parseToolCallsDetailed(
   text: string,
   options: ParseToolCallsOptions = {}
 ): ToolCallParseResult {
-  if (!text) return { calls: [], dropped: [] };
+  if (!text) return { calls: [], dropped: [], placeholders: 0 };
 
   const raws = collectRawCalls(closeUnterminatedToolBlock(text), options);
 
   const calls: ParsedToolCall[] = [];
   const dropped: ParsedToolCall[] = [];
   const seen = new Set<string>();
+  let placeholders = 0;
 
   for (const raw of raws) {
     const parsedBody = raw.args ? { name: raw.name, args: raw.args } : jsonToolCall(raw.body);
@@ -142,8 +170,11 @@ export function parseToolCallsDetailed(
       continue;
     }
 
-    // `name="NAME"` inside an example is instruction text, not a call.
-    if (PLACEHOLDER_NAMES.has(name.trim().toLowerCase())) continue;
+    // `name="NAME"` / `name="…"` is instruction text, not a call.
+    if (isPlaceholderName(name)) {
+      placeholders += 1;
+      continue;
+    }
 
     const resolved = resolveToolName(name, options);
     if (!resolved) {
@@ -210,7 +241,7 @@ export function parseToolCallsDetailed(
     if (calls.length >= 16) break;
   }
 
-  return { calls, dropped };
+  return { calls, dropped, placeholders };
 }
 
 interface RawCall {
@@ -722,6 +753,13 @@ export function stripToolCalls(text: string): string {
     .trim();
 }
 
+/** A `<tool_call>` that never closed, so it could not be executed. */
+export function hasUnclosedToolCall(text: string): boolean {
+  const opened = (text.match(/<tool_call\b/gi) ?? []).length;
+  const closed = (text.match(/<\/tool_call>/gi) ?? []).length;
+  return opened > closed;
+}
+
 export function hasToolCalls(text: string): boolean {
   return /<tool_call[\s>]|<function\s*=|<function\s+name\s*=|\[TOOL_CALLS\]/i.test(text);
 }
@@ -736,6 +774,46 @@ export function toOpenAIToolCalls(calls: ParsedToolCall[]): OpenAIToolCall[] {
       arguments: JSON.stringify(call.args ?? {}),
     },
   }));
+}
+
+/**
+ * A concrete example for a tool, used in error messages.
+ *
+ * The name is always a real declared tool: a message containing a placeholder
+ * name teaches the model to send that placeholder back.
+ */
+export function exampleCall(
+  tools?: OpenAITool[],
+  preferred?: string
+): { name: string; arguments: Record<string, unknown> } | undefined {
+  const names = (tools ?? []).map((tool) => tool?.function?.name).filter(Boolean) as string[];
+  if (names.length === 0) return undefined;
+
+  const pick =
+    (preferred && names.find((name) => name === preferred)) ??
+    names.find((name) => name === "bash") ??
+    names.find((name) => name === "list_dir") ??
+    names[0]!;
+
+  const args: Record<string, unknown> = {};
+  const schema = (tools ?? []).find((tool) => tool?.function?.name === pick)?.function?.parameters as
+    | { required?: string[]; properties?: Record<string, { type?: string }> }
+    | undefined;
+
+  const required = schema?.required ?? Object.keys(schema?.properties ?? {});
+  for (const key of required) {
+    if (key === "command") args[key] = "dir";
+    else if (key === "path") args[key] = "src/index.ts";
+    else if (key === "content") args[key] = "the complete file content";
+    else if (key === "pattern") args[key] = "**/*.ts";
+    else if (key === "from") args[key] = "a.txt";
+    else if (key === "to") args[key] = "b.txt";
+    else if (key === "old") args[key] = "text to replace";
+    else if (key === "new") args[key] = "replacement text";
+    else args[key] = "value";
+  }
+
+  return { name: pick, arguments: args };
 }
 
 export interface ToolSchemaSummary {

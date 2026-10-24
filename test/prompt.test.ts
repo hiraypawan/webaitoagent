@@ -49,7 +49,10 @@ describe("buildPrompt", () => {
       ],
     });
     assert.match(prompt, /- bash — run/);
-    assert.match(prompt, /<tool_call name="TOOL_NAME">/);
+    // The example must be a real tool, never a placeholder the model can copy.
+    assert.match(prompt, /<tool_call name="bash">/);
+    assert.doesNotMatch(prompt, /name="TOOL_NAME"/);
+    assert.doesNotMatch(prompt, /name="…"/);
   });
 
   it("elides the middle of very long prompts", () => {

@@ -84,7 +84,12 @@ export const config = {
   // Provider behaviour
   requestTimeoutMs: int("REQUEST_TIMEOUT_MS", 180_000, 1_000),
   streamPollMs: int("STREAM_POLL_MS", 250, 50),
-  streamIdlePolls: int("STREAM_IDLE_POLLS", 6, 1),
+  /**
+   * Polls with no visible change before the answer is considered complete.
+   * MiMo pauses while it thinks, so this must be generous (20 x 250ms = 5s);
+   * ending early truncates the answer mid-file.
+   */
+  streamIdlePolls: int("STREAM_IDLE_POLLS", 20, 1),
   streamMaxWaitMs: int("STREAM_MAX_WAIT_MS", 180_000, 1_000),
   streamStartTimeoutMs: int("STREAM_START_TIMEOUT_MS", 75_000, 1_000),
   providerRetries: int("PROVIDER_RETRIES", 3, 1),
@@ -93,6 +98,8 @@ export const config = {
   maxPromptChars: int("MAX_PROMPT_CHARS", 120_000, 1_000),
   /** Extra CSS selectors for the model's "Thinking…" block (comma separated). */
   reasoningSelectors: optionalStr("REASONING_SELECTORS"),
+  /** CSS selectors that mean "the site is still generating" (comma separated). */
+  generatingSelectors: optionalStr("GENERATING_SELECTORS"),
   /** Upper bound for automatic growth of the prompt budget. */
   maxPromptCharsCeiling: int("MAX_PROMPT_CHARS_CEILING", 400_000, 1_000),
   /** Let the server translate `<tool_call>` blocks into native `tool_calls`. */

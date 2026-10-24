@@ -74,6 +74,28 @@ To force a shell: `set AGENT_SHELL=powershell` before starting `npm run dev`
 
 ---
 
+## The agent stops halfway through a file
+
+The answer was still being written when the reader gave up. The bridge now waits
+while the page shows a stop button, and tolerates 5 seconds of silence between
+paragraphs. If it still happens with very long files, raise the limits in `.env`:
+
+```ini
+STREAM_IDLE_POLLS=30
+STREAM_MAX_WAIT_MS=300000
+```
+
+and if the site uses a different "stop" control, add its selector:
+
+```ini
+GENERATING_SELECTORS=button[aria-label*='stop' i]
+```
+
+The log says when an answer ended inside a code block, which is the fingerprint of
+a cut-off generation.
+
+---
+
 ## opencode says "tool call could not be read"
 
 The model replied but the bridge could not understand its markup. The message
@@ -87,6 +109,15 @@ calls. Capture one raw reply and it can be supported explicitly:
 ```bash
 WEB chat "list the files" --debug
 ```
+
+---
+
+## The agent keeps sending `<tool_call name="…">` and nothing happens
+
+That is a placeholder copied from an example (often from an older error message).
+It is now ignored instead of being reported as "unknown tool", and the bridge
+replies with a real tool name and real arguments. If it repeats, restart the
+server so both sides use the current prompt.
 
 ---
 

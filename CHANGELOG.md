@@ -29,6 +29,33 @@ recognised but executed with the wrong arguments, and a false "server busy".
 - 14 more tests, including the exact MiMo markup and the HTTP/SSE translation
   opencode consumes.
 
+## 1.5.3
+
+was teaching the model to fail, and answers were cut off mid-file.
+
+### Fixed
+- **Placeholder loop.** Our own instructions and error text contained
+  `name="TOOL_NAME"` / `name="…"`. MiMo copied them back, the parser saw an
+  unknown tool, and the next message repeated the template — forever. Placeholder
+  names are now recognised ([`isPlaceholderName`](src/core/toolcalls.ts)) and
+  ignored, instructions and examples are generated from the request's real tools
+  (`exampleCall`), and an all-placeholder reply gets a corrective note naming a
+  real tool with real arguments.
+- **Answers truncated mid-file.** Completion was inferred from 1.5 s of unchanged
+  text, but MiMo pauses while thinking. Idle detection is now 20 polls (5 s) and
+  is overridden while the page shows a generating indicator (`aria-busy`, a stop
+  button, `data-generating`; override with `GENERATING_SELECTORS`). A response
+  that ends inside an unclosed code fence now logs a warning.
+- `Thinking...` merged onto the answer line is removed (previously only a
+  standalone header line was), and reasoning selectors cover more markup
+  (`cot`, `chain-of-thought`, `data-testid`).
+- A closed, placeholder-named block no longer produces the misleading "tool call
+  was incomplete" note: `hasUnclosedToolCall` counts real open/close pairs.
+
+### Added
+- 24 tests: placeholder names and examples, the corrective note end to end, the
+  unclosed-block check, and the merged `Thinking...` marker.
+
 ## 1.5.1
 
 Fixes from a real Windows session: broken tool calls, reasoning in the answer,
