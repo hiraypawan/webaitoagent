@@ -1,0 +1,32 @@
+{
+  "name": "web-agents-to",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "type": "module",
+  "bin": {
+    "web": "./bin/web.js"
+  },
+  "scripts": {
+    "dev": "tsx src/server/main.ts",
+    "build": "tsc",
+    "cli": "tsx src/cli/index.ts",
+    "start": "node dist/server/main.js",
+    "login": "tsx src/cli/login.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/cors": "^11.3.1",
+    "dotenv": "^18.0.9",
+    "fastify": "^5.12.7",
+    "playwright": "^1.64.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

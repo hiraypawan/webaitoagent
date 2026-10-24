@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Web Agents To",
+  "version": "1.0.0",
+  "description": "Bridge free web AI models to your local Web Agents To API.",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": ["http://127.0.0.1:8787/*", "https://aistudio.xiaomimimo.com/*"],
+  "action": { "default_popup": "popup.html" },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://aistudio.xiaomimimo.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
