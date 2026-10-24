@@ -1,89 +1,228 @@
 # Web Agents To
 
-Bridge free web AI flagship models (Xiaomi MiMo V2.6 Pro, etc.) to a local OpenAI-compatible API, CLI, and browser extension.
+Turn a free web AI chat UI (Xiaomi **MiMo V2.6 Pro**) into a **local OpenAI-compatible API**, a CLI, an agentic coding loop, and a browser extension.
+
+It runs a real Chromium session with Playwright against the provider's website, types your prompt into the chat box, scrapes the answer as it is written, and serves it back in the OpenAI wire format — so any OpenAI-compatible client can use it without an API key or per-token billing.
+
+```
+your app / CLI / extension
+        │  OpenAI JSON
+        ▼
+Fastify  :8787   auth · CORS · SSE · validation
+        ▼
+BrowserChatProvider   prompt building · DOM scraping · retries · queueing
+        ▼
+Playwright persistent Chromium (saved login)
+        ▼
+aistudio.xiaomimimo.com  →  MiMo V2.6 Pro
+```
+
+> ⚠️ **Use responsibly.** Automating a consumer web UI is not the same as using a provider's API. It can break when the site changes, and it may violate the provider's terms. Only use accounts you own.
+
+---
 
 ## Quick start
 
+Requirements: **Node.js 20.3+**, and a Chromium that Playwright can drive.
+
 ```bash
 npm install
-npm run dev
+npx playwright install chromium   # one-time browser download
+cp .env.example .env              # optional, then edit
+npm run dev                       # API on http://127.0.0.1:8787
 ```
 
-Server runs on http://127.0.0.1:8787
-
-### Login to MiMo
+### 1. Sign in once
 
 ```bash
 npm run login -- --provider=mimo
+# or: WEB login
 ```
 
-A browser opens for Xiaomi account login. Close it when done — session saved to `~/.web-agents-to/profiles/mimo`.
+A **visible** browser opens. Sign in (Google SSO or Xiaomi account), then close the window. The session is stored in `~/.web-agents-to/profiles/mimo` and reused on every restart.
 
-Or set `.env`:
-```
-MIMO_USER=justcheck008@gmail.com
-MIMO_PASS=Nawap@098
-```
+Set `HEADLESS=false` if you prefer to watch the automation work.
 
-### CLI chat
+### 2. Chat
 
 ```bash
-npm run cli -- "Hello, who are you?" --model=mimo/mimo-v2.6-pro
+# one-shot
+npm run cli -- "Explain closures in one paragraph"
+
+# interactive
+WEB repl
+
+# agentic: the model can run commands and edit files
+WEB agent "list the files here and summarise this project"
 ```
 
-### Interactive chat
+### 3. Or point any OpenAI client at it
 
 ```bash
-WEB
-```
-
-Type prompts and get streamed responses from MiMo V2.6 Pro.
-
-### Agentic CLI (tools)
-
-`WEB` runs an agent loop with local tools: `bash`, `read_file`, `write_file`, `list_dir`.
-
-```bash
-WEB
-Agent> list the files here and summarize this project
-
-WEB agent "read README.md and suggest improvements"
-```
-
-The model emits `<tool_call name="...">`, the CLI executes it locally, feeds the result back, and repeats until done. This gives you a local coding agent on the free web model.
-
-### OpenAI-compatible API
-
-```bash
-curl http://127.0.0.1:8787/v1/models -H "Authorization: Bearer web-agents-to"
+curl http://127.0.0.1:8787/v1/models \
+  -H "Authorization: Bearer web-agents-to"
 
 curl http://127.0.0.1:8787/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer web-agents-to" \
-  -d '{"model":"mimo/mimo-v2.6-pro","messages":[{"role":"user","content":"hi"}],"stream":true}'
+  -d '{"model":"mimo/mimo-v2.6-pro","stream":true,
+       "messages":[{"role":"user","content":"hi"}]}'
 ```
 
-### Browser extension
+```python
+from openai import OpenAI
 
-Load `extension/` folder as unpacked extension in Chrome/Edge.
-
-## Configuration (.env)
-
-```
-PORT=8787
-HOST=127.0.0.1
-HEADLESS=true
-API_KEY=web-agents-to
-MIMO_USER=
-MIMO_PASS=
+client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="web-agents-to")
+stream = client.chat.completions.create(
+    model="mimo/mimo-v2.6-pro",
+    messages=[{"role": "user", "content": "hello"}],
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
 ```
 
-## Architecture
+In Cline / Continue / opencode / LangChain, set the base URL to `http://127.0.0.1:8787/v1`, any API key matching `API_KEY`, and pick a model id from `/v1/models`.
 
-- src/core: shared types
-- src/browser: Playwright persistent-context manager (reuses session, no new page per request)
-- src/providers: MiMo adapter with retry logic
-- src/server: Fastify OpenAI-compatible server
-- src/cli: CLI client + interactive REPL
-- extension: Chrome extension (Manifest V3)
-- bin/web.js: `WEB` launcher command
+---
+
+## API
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/health` | no | Liveness, version, provider ids |
+| `GET` | `/status` | yes | Browser/session/queue state per provider |
+| `GET` | `/v1/models` | yes | Models in OpenAI `list` shape |
+| `POST` | `/v1/chat/completions` | yes | Chat, `stream: true` or JSON |
+| `POST` | `/auth/login` | yes | Opens a headed browser for sign-in |
+| `POST` | `/auth/logout` | yes | Closes the provider browser |
+
+Everything except `/health` requires `Authorization: Bearer $API_KEY`.
+
+**Streaming** is real: the page is scraped every `STREAM_POLL_MS` and only the new suffix is emitted as a `chat.completion.chunk`, followed by a `finish_reason: "stop"` chunk and `data: [DONE]`.
+
+**Tool calling.** Web UIs have no native function calling, so the server translates the text protocol
+
+```
+<tool_call name="bash">{"command":"ls"}</tool_call>
+```
+
+into OpenAI `tool_calls` when the request includes a `tools` array (`NATIVE_TOOLS=true`). Clients that support tools can then run them themselves. Because a call is only complete once it has been fully generated, tool-enabled streams are buffered before the single `tool_calls` delta is sent.
+
+---
+
+## CLI
+
+`WEB` is the launcher (`npm link` to use it from anywhere):
+
+| Command | Description |
+|---|---|
+| `WEB` | Agentic interactive session (auto-starts the server) |
+| `WEB agent "task"` | Agent loop with local tools |
+| `WEB agent "task" --yes --model=... --steps=8 --cwd=...` | Non-interactive agent |
+| `WEB repl` | Plain interactive chat |
+| `WEB chat "prompt"` | One-shot chat (`--json` for machine output) |
+| `WEB start` | Server only |
+| `WEB models` | List models |
+| `WEB login` / `WEB logout` | Manage the provider session |
+| `WEB version` | Version |
+
+The agent has `bash`, `read_file`, `write_file`, `replace_in_file` and `list_dir`. **Destructive actions ask for confirmation**; pass `--yes` (or `AGENT_AUTO_APPROVE=true`) for scripts. Tools are confined to the workspace root unless `AGENT_ALLOW_OUTSIDE=true`.
+
+---
+
+## Browser extension
+
+1. `chrome://extensions` → enable Developer mode → **Load unpacked** → select `extension/`.
+2. Open the extension popup and set the local API URL, API key and model.
+3. Open `aistudio.xiaomimimo.com` — a floating panel appears in the bottom-right (Ctrl/Cmd+Enter sends).
+
+Settings are stored with `chrome.storage.local`; no credentials are baked into the extension.
+
+---
+
+## Configuration
+
+Copy `.env.example` to `.env`. The important ones:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PORT` / `HOST` | `8787` / `127.0.0.1` | Bind address |
+| `API_KEY` | `web-agents-to` | Bearer token. **Change it.** |
+| `CORS_ORIGINS` | – | Extra allowed origins (loopback + extensions always allowed) |
+| `ALLOW_INSECURE` | `false` | Permit a non-loopback bind with the default key |
+| `HEADLESS` | `true` | `false` shows the browser |
+| `PROFILE_ROOT` | `~/.web-agents-to/profiles` | Login profiles |
+| `SITE_OVERRIDES` | – | JSON patch for selectors when a site changes |
+| `MIMO_USER` / `MIMO_PASS` | – | Optional Xiaomi password auto-login |
+| `REQUEST_TIMEOUT_MS` | `180000` | Whole-request budget |
+| `STREAM_POLL_MS` | `250` | DOM polling interval |
+| `STREAM_IDLE_POLLS` | `6` | Unchanged polls that mean "done" |
+| `STREAM_START_TIMEOUT_MS` | `45000` | Give up if no answer starts |
+| `STREAM_MAX_WAIT_MS` | `180000` | Hard cap on one answer |
+| `PROVIDER_RETRIES` | `3` | Retries for "server busy"/transient failures |
+| `MAX_QUEUE` | `16` | Requests queued behind the active chat (then 429) |
+| `NATIVE_TOOLS` | `true` | Translate `<tool_call>` into `tool_calls` |
+| `AGENT_*` | – | Agent approvals, step limit, shell timeout, output cap |
+
+### When the website changes
+
+Selectors live in `src/providers/mimo.ts`. Patch them at runtime instead of editing code:
+
+```json
+// ~/.web-agents-to/providers/mimo.json  (or point SITE_OVERRIDES at a file)
+{
+  "inputSelectors": ["div[contenteditable='true']"],
+  "responseSelectors": ["[data-testid='message-content']"]
+}
+```
+
+Only the keys you provide are replaced; credentials can never be injected this way.
+
+---
+
+## Security
+
+- The server binds to loopback and **refuses to start** on a public interface while the default API key is in use (override with `ALLOW_INSECURE=true`).
+- All routes except `/health` require the bearer token, including `/auth/login`; comparisons are constant-time.
+- CORS only allows loopback, configured origins and browser-extension schemes, so random websites cannot call your local API.
+- Tools refuse paths outside the workspace root and require approval for shell commands and edits.
+- Profiles contain live login cookies: treat `~/.web-agents-to` as a secret, and prefer a dedicated account.
+
+> **Rotate your password if you used an earlier version of this repo.** A previous README contained a real account/password pair; that secret is still in git history. Remove any `.env` you committed and change the password.
+
+To listen beyond loopback, set a strong `API_KEY` and put the server behind TLS (reverse proxy or tunnel) — the token travels in clear text over plain HTTP.
+
+---
+
+## Development
+
+```bash
+npm run typecheck   # strict tsc
+npm test            # node:test via tsx (65 tests)
+npm run build       # dist/
+npm start           # run the built server
+```
+
+CI runs typecheck, tests and the build on Node 20 and 22 (see `.github/workflows/ci.yml`).
+
+## Project layout
+
+| Path | Purpose |
+|---|---|
+| `src/server` | Fastify app: auth, CORS, SSE, validation, error mapping |
+| `src/providers` | `SiteConfig` + `BrowserChatProvider` + MiMo adapter + overrides |
+| `src/browser` | Lazy, persistent-context Chromium manager |
+| `src/core` | Types, errors, prompt building, SSE, delta tracking, mutex, tool protocol |
+| `src/cli` | API client, REPL, agent loop, local tools, login/logout |
+| `extension` | Manifest V3 popup + floating panel |
+| `test` | Unit + HTTP-level tests with an injected fake provider |
+| `docs/ARCHITECTURE.md` | Design and data flow |
+
+## Known limitations
+
+- **Scraping is fragile.** A UI redesign breaks selectors until you patch them (hence `SITE_OVERRIDES`).
+- **Text streaming is simulated at the model level.** Deltas are incremental, but the model still generates inside a website; the first token arrives when the site renders it.
+- **One conversation per provider at a time.** Requests are serialised; a second request waits (up to `MAX_QUEUE`) and then gets `429`.
+- **Tool calls are a prompt protocol**, not the model's native function calling.
+- **No parity with the OpenAI API** beyond chat completions/models (no embeddings, images, audio, fine-tuning).

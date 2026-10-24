@@ -1,21 +1,49 @@
 {
   "name": "web-agents-to",
-  "version": "1.0.0",
-  "description": "",
-  "main": "dist/index.js",
+  "version": "1.1.0",
+  "description": "Turn a free web AI chat UI into a local OpenAI-compatible API, CLI and browser extension.",
   "type": "module",
+  "main": "dist/server/main.js",
   "bin": {
     "web": "./bin/web.js"
   },
+  "files": [
+    "bin",
+    "src",
+    "dist",
+    "extension",
+    "README.md",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=20.3.0"
+  },
   "scripts": {
     "dev": "tsx src/server/main.ts",
-    "build": "tsc",
-    "cli": "tsx src/cli/index.ts",
+    "build": "tsc -p tsconfig.json",
     "start": "node dist/server/main.js",
-    "login": "tsx src/cli/login.ts"
+    "cli": "tsx src/cli/index.ts",
+    "repl": "tsx src/cli/repl.ts",
+    "agent": "tsx src/cli/agent.ts",
+    "login": "tsx src/cli/login.ts",
+    "logout": "tsx src/cli/logout.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "openai-compatible",
+    "llm",
+    "playwright",
+    "browser-automation",
+    "cli",
+    "agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hiraypawan/webaitoagent.git"
+  },
+  "author": "hiraypawan",
   "license": "ISC",
   "dependencies": {
     "@fastify/cors": "^11.3.1",

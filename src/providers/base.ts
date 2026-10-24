@@ -1,6 +1,28 @@
-import type { Browser, BrowserContext, Page } from "playwright";
-import type { Provider, ProviderModel, ChatCompletionRequest, ChatChunk } from "../core/types.js";
-import { PlaywrightBrowserManager } from "../browser/manager.js";
+import type { Locator, Page } from "playwright";
+import type {
+  ChatChunk,
+  ChatCompletionRequest,
+  Provider,
+  ProviderModel,
+  ProviderStatus,
+} from "../core/types.js";
+import type { PlaywrightBrowserManager } from "../browser/manager.js";
+import { config } from "../config/index.js";
+import { log } from "../core/logger.js";
+import { KeyedMutex } from "../core/mutex.js";
+import {
+  LoginRequiredError,
+  ProviderError,
+  RequestAbortedError,
+  ServerBusyError,
+} from "../core/errors.js";
+import {
+  buildContinuationPrompt,
+  buildPrompt,
+  conversationKey,
+} from "../core/prompt.js";
+import { DeltaTracker, stripBaseline } from "../core/stream.js";
+import { newId, nowSeconds, sleep } from "../core/utils.js";
 
 export interface SiteConfig {
   id: string;
@@ -17,294 +39,526 @@ export interface SiteConfig {
   usernameSelector?: string;
   passwordSelector?: string;
   loginButtonSelector?: string;
+  /** Substrings that mean "the site is rate limiting us" (safe to retry). */
+  busyPatterns?: string[];
   credentials?: { user?: string; pass?: string };
 }
 
-export class BrowserChatProvider implements Provider {
-  id: string;
-  name: string;
-  models: ProviderModel[];
-  private cfg: SiteConfig;
-  private bm: PlaywrightBrowserManager;
-  private page: Page | null = null;
-  private lastMessageCount = 0;
-  private lastFirstMessage = "";
+export interface BrowserChatProviderOptions {
+  requestTimeoutMs?: number;
+  streamPollMs?: number;
+  streamIdlePolls?: number;
+  streamMaxWaitMs?: number;
+  streamStartTimeoutMs?: number;
+  retries?: number;
+  retryDelayMs?: number;
+  maxPromptChars?: number;
+  maxQueue?: number;
+}
 
-  constructor(cfg: SiteConfig, bm: PlaywrightBrowserManager) {
+const DEFAULT_BUSY_PATTERNS = [
+  "服务器繁忙",
+  "服务繁忙",
+  "server is busy",
+  "system is busy",
+  "too many requests",
+  "please try again later",
+];
+
+/**
+ * Drives a provider's web chat UI through Playwright and exposes it as an
+ * OpenAI-style streaming provider.
+ *
+ * Answers are scraped from the DOM. They are emitted as *incremental* deltas as
+ * the text grows, rather than one blob at the end, so `stream: true` behaves
+ * like a real completion stream.
+ */
+export class BrowserChatProvider implements Provider {
+  readonly id: string;
+  readonly name: string;
+  readonly models: ProviderModel[];
+
+  private readonly cfg: SiteConfig;
+  private readonly bm: PlaywrightBrowserManager;
+  private readonly opts: Required<BrowserChatProviderOptions>;
+  private readonly mutex: KeyedMutex;
+
+  private page: Page | null = null;
+  private lastConversationKey = "";
+  private lastMessageCount = 0;
+  private readonly busyPatterns: string[];
+
+  constructor(cfg: SiteConfig, bm: PlaywrightBrowserManager, opts: BrowserChatProviderOptions = {}) {
     this.cfg = cfg;
+    this.bm = bm;
     this.id = cfg.id;
     this.name = cfg.name;
     this.models = cfg.models;
-    this.bm = bm;
+    this.busyPatterns = cfg.busyPatterns?.length ? cfg.busyPatterns : DEFAULT_BUSY_PATTERNS;
+    this.opts = {
+      requestTimeoutMs: opts.requestTimeoutMs ?? config.requestTimeoutMs,
+      streamPollMs: opts.streamPollMs ?? config.streamPollMs,
+      streamIdlePolls: opts.streamIdlePolls ?? config.streamIdlePolls,
+      streamMaxWaitMs: opts.streamMaxWaitMs ?? config.streamMaxWaitMs,
+      streamStartTimeoutMs: opts.streamStartTimeoutMs ?? config.streamStartTimeoutMs,
+      retries: Math.max(1, opts.retries ?? config.providerRetries),
+      retryDelayMs: opts.retryDelayMs ?? config.providerRetryDelayMs,
+      maxPromptChars: opts.maxPromptChars ?? config.maxPromptChars,
+      maxQueue: opts.maxQueue ?? config.maxQueue,
+    };
+    this.mutex = new KeyedMutex(this.opts.maxQueue);
   }
 
-  async init(ctx: BrowserContext): Promise<void> {}
+  /** Nothing to do: the browser starts on first use, not at boot. */
+  async init(): Promise<void> {}
 
-  async login(headed: boolean): Promise<void> {
-    const ctx = headed
-      ? await this.bm.openHeaded(this.id)
-      : await this.bm.context(this.id);
-    const page = await ctx.newPage();
-    await page.goto(this.cfg.baseUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
-    console.log(`\n[login] Opened ${this.cfg.baseUrl}. Log in manually, then close the browser window.\n`);
+  status(): ProviderStatus {
+    return {
+      id: this.id,
+      name: this.name,
+      models: this.models,
+      browser: this.bm.status(this.id),
+      queue: this.mutex.stats(this.id),
+    };
+  }
+
+  async close(): Promise<void> {
+    this.page = null;
+    await this.bm.closeProvider(this.id);
+  }
+
+  async login(headed = true): Promise<void> {
+    const ctx = headed ? await this.bm.openHeaded(this.id) : await this.bm.context(this.id);
+    const page = ctx.pages().find((candidate) => !candidate.isClosed()) ?? (await ctx.newPage());
+    await page
+      .goto(this.cfg.baseUrl, { waitUntil: "domcontentloaded", timeout: 60_000 })
+      .catch(() => {});
+
+    if (!headed) {
+      log.warn("[login] HEADLESS=true: a visible window is required to sign in.");
+      return;
+    }
+
+    log.info(`[login] Opened ${this.cfg.baseUrl}. Sign in, then close the browser window.`);
     await new Promise<void>((resolve) => {
-      ctx.on("close", () => resolve());
-      page.on("close", () => resolve());
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      ctx.once("close", finish);
+      page.once("close", finish);
     });
-    console.log("[login] Profile saved.");
-  }
 
-  private async getPage(): Promise<Page> {
-    if (this.page && !this.page.isClosed()) {
-      try {
-        await this.page.bringToFront();
-        return this.page;
-      } catch {}
-    }
-    const ctx = await this.bm.context(this.id);
-    this.page = await ctx.newPage();
-    return this.page;
-  }
-
-  private async openChatPage(): Promise<{ ctx: BrowserContext; page: Page }> {
-    const ctx = await this.bm.context(this.id);
-    const page = await this.getPage();
-    if (await this.findInput(page)) {
-      return { ctx, page };
-    }
-    for (const url of this.cfg.chatUrls) {
-      try {
-        await page.goto(url, { waitUntil: "networkidle", timeout: 45000 });
-      } catch {}
-      await page.waitForTimeout(2000);
-      for (const txt of ["Accept All", "Accept cookies", "Accept"]) {
-        const b = page.locator("button", { hasText: txt }).first();
-        if (await b.isVisible().catch(() => false)) { await b.click().catch(() => {}); await page.waitForTimeout(500); break; }
-      }
-      if (await this.findInput(page)) return { ctx, page };
-    }
-    await page.goto(this.cfg.baseUrl, { waitUntil: "networkidle", timeout: 45000 }).catch(() => {});
-    await page.waitForTimeout(2000);
-    if (await this.findInput(page)) return { ctx, page };
-
-    if (this.cfg.credentials?.user && this.cfg.credentials?.pass && this.cfg.loginUrl) {
-      try {
-        await page.goto(this.cfg.loginUrl, { waitUntil: "networkidle", timeout: 45000 });
-        await page.waitForTimeout(2000);
-        const u = page.locator(this.cfg.usernameSelector ?? "input[name='account']").first();
-        const p = page.locator(this.cfg.passwordSelector ?? "input[name='password']").first();
-        await u.fill(this.cfg.credentials.user);
-        await p.fill(this.cfg.credentials.pass);
-        const cb = page.locator("input[type='checkbox']").first();
-        if (await cb.isVisible().catch(() => false)) await cb.check().catch(() => {});
-        const cookieBtn = page.locator("button:has-text('Accept cookies')").first();
-        if (await cookieBtn.isVisible().catch(() => false)) await cookieBtn.click().catch(() => {});
-        const btn = page.locator(this.cfg.loginButtonSelector ?? "button:has-text('Sign in')").first();
-        await btn.click();
-        await page.waitForTimeout(5000);
-        const agreeBtn = page.locator("button:has-text('Agree')").first();
-        if (await agreeBtn.isVisible().catch(() => false)) {
-          await agreeBtn.click().catch(() => {});
-          await page.waitForTimeout(5000);
-        }
-      } catch (e) {
-        console.error("auto-login failed", e);
-      }
-      for (const url of this.cfg.chatUrls) {
-        try { await page.goto(url, { waitUntil: "networkidle", timeout: 45000 }); } catch {}
-        await page.waitForTimeout(2000);
-        if (await this.findInput(page)) return { ctx, page };
-      }
-    }
-
-    if (!(await this.findInput(page))) {
-      throw new Error(
-        `LOGIN_REQUIRED: No chat input found for ${this.id}. Run login first. Hint: ${this.cfg.loginHint}`
-      );
-    }
-    return { ctx, page };
-  }
-
-  private async findInput(page: Page): Promise<any> {
-    for (const sel of this.cfg.inputSelectors) {
-      const loc = page.locator(sel);
-      const count = await loc.count().catch(() => 0);
-      for (let i = 0; i < count; i++) {
-        const el = loc.nth(i);
-        if (await el.isVisible().catch(() => false)) return el;
-      }
-    }
-    return null;
-  }
-
-  private async findSubmit(page: Page): Promise<any> {
-    for (const sel of this.cfg.submitSelectors) {
-      const loc = page.locator(sel);
-      const count = await loc.count().catch(() => 0);
-      for (let i = 0; i < count; i++) {
-        const el = loc.nth(i);
-        if (await el.isVisible().catch(() => false)) return el;
-      }
-    }
-    return null;
+    this.page = null;
+    this.lastConversationKey = "";
+    log.info("[login] Profile saved; the session will be reused by the server.");
   }
 
   async *chat(req: ChatCompletionRequest, signal?: AbortSignal): AsyncGenerator<ChatChunk> {
-    const MAX_RETRIES = 3;
-    let lastError: Error | null = null;
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      if (attempt > 0) {
-        console.log(`[chat] retry ${attempt}/${MAX_RETRIES - 1} after server busy...`);
-        await new Promise((r) => setTimeout(r, 3000 * attempt));
+    const timeout = new AbortController();
+    const timer = setTimeout(() => {
+      timeout.abort(new ProviderError(`${this.id} took longer than ${this.opts.requestTimeoutMs}ms`, 504));
+    }, this.opts.requestTimeoutMs);
+    timer.unref?.();
+
+    const combined = signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal;
+
+    try {
+      let emitted = false;
+      for (let attempt = 1; attempt <= this.opts.retries; attempt++) {
+        const release = await this.mutex.acquire(this.id, combined);
+        try {
+          for await (const chunk of this.streamOnce(req, combined)) {
+            // Only real content counts as delivered: an unfinished stream can
+            // still be retried safely.
+            if (chunk.choices[0]?.delta?.content) emitted = true;
+            yield chunk;
+          }
+          return;
+        } catch (error) {
+          if (combined.aborted) throw this.abortError(combined, signal, timeout.signal);
+          // A partially delivered answer cannot be retried without duplication.
+          if (emitted) {
+            log.error(`[${this.id}] stream failed after partial output: ${describe(error)}`);
+            return;
+          }
+          if (attempt >= this.opts.retries || !this.isRetryable(error)) throw error;
+
+          const delay = this.opts.retryDelayMs * attempt + Math.floor(Math.random() * 250);
+          log.warn(
+            `[${this.id}] attempt ${attempt}/${this.opts.retries} failed (${describe(error)}); retrying in ${delay}ms`
+          );
+          // Do not hold the provider lock while backing off.
+          release();
+          await sleep(delay, combined);
+          this.lastConversationKey = "";
+          this.page = null;
+        } finally {
+          release();
+        }
       }
-      try {
-        const gen = this._chatOnce(req, signal);
-        const chunks: ChatChunk[] = [];
-        let busy = false;
-        for await (const c of gen) {
-          chunks.push(c);
-          const txt = (c as any)?.choices?.[0]?.delta?.content ?? "";
-          if (txt.includes("服务器繁忙")) busy = true;
-        }
-        if (busy) {
-          throw new Error("SERVER_BUSY: MiMo server busy, please try again later");
-        }
-        for (const c of chunks) yield c;
-        return;
-      } catch (e: any) {
-        lastError = e;
-        if (!String(e?.message).includes("SERVER_BUSY") && !String(e?.message).includes("繁忙")) {
-          throw e;
-        }
-      }
+    } finally {
+      clearTimeout(timer);
     }
-    throw lastError ?? new Error("SERVER_BUSY: MiMo server busy after retries");
   }
 
-  private async *_chatOnce(req: ChatCompletionRequest, signal?: AbortSignal): AsyncGenerator<ChatChunk> {
-    const { page } = await this.openChatPage();
-    const id = "chatcmpl-" + Math.random().toString(36).slice(2);
-    const created = Math.floor(Date.now() / 1000);
+  private async *streamOnce(
+    req: ChatCompletionRequest,
+    signal?: AbortSignal
+  ): AsyncGenerator<ChatChunk> {
+    const page = await this.openChatPage(signal);
+    const id = newId("chatcmpl");
+    const created = nowSeconds();
     const model = req.model;
 
-    // detect if this is a new conversation
-    const firstMsg = req.messages.length > 0 ? String(req.messages[0].content).slice(0, 100) : "";
-    const isNewConv = req.messages.length < this.lastMessageCount || firstMsg !== this.lastFirstMessage;
+    const key = conversationKey(req.messages);
+    const isNewConversation = key !== this.lastConversationKey || req.messages.length < this.lastMessageCount;
+    if (isNewConversation) await this.startNewChat(page);
 
-    // start a fresh conversation if needed
-    if (isNewConv) {
-      for (const sel of this.cfg.newChatSelectors ?? []) {
-        const b = page.locator(sel).first();
-        if (await b.isVisible().catch(() => false)) { await b.click().catch(() => {}); await page.waitForTimeout(2000); break; }
-      }
-    }
+    const prompt = isNewConversation
+      ? buildPrompt(req.messages, { tools: req.tools, maxChars: this.opts.maxPromptChars })
+      : buildContinuationPrompt(req.messages, { tools: req.tools, maxChars: this.opts.maxPromptChars });
 
-    // Build prompt
-    let prompt: string;
-    // Include tool definitions if present (for agentic clients like opencode)
-    const tools = (req as any).tools;
-    const toolDesc = tools ? "\n\nAvailable tools:\n" + JSON.stringify(tools).slice(0, 2000) : "";
-
-    if (isNewConv || req.messages.length <= 1) {
-      prompt = req.messages
-        .map((m) => {
-          const content = typeof m.content === "string" ? m.content : (m.content as any[]).map((c) => c.text ?? "").join("");
-          if (m.role === "user") return `User: ${content}`;
-          if (m.role === "assistant") return `Assistant: ${content}`;
-          if (m.role === "system") return `System: ${content}`;
-          if (m.role === "tool") return `Tool result: ${content}`;
-          return `${m.role}: ${content}`;
-        })
-        .join("\n") + toolDesc + "\nAssistant:";
-    } else {
-      const lastUser = [...req.messages].reverse().find((m) => m.role === "user");
-      const content = lastUser ? (typeof lastUser.content === "string" ? lastUser.content : (lastUser.content as any[]).map((c) => c.text ?? "").join("")) : "";
-      prompt = content + toolDesc;
-    }
-
-    // track conversation state
-    this.lastMessageCount = req.messages.length;
-    this.lastFirstMessage = firstMsg;
+    if (!prompt.trim()) throw new ProviderError("the request produced an empty prompt", 400);
 
     const input = await this.findInput(page);
-    if (!input) {
-      throw new Error(`LOGIN_REQUIRED: no input for ${this.id}`);
-    }
-    await input.click().catch(() => {});
-    await input.fill(prompt).catch(async () => {
-      await input.type(prompt, { delay: 5 });
-    });
+    if (!input) throw new LoginRequiredError(`no chat input found for ${this.id}`, this.cfg.loginHint);
 
-    // capture baseline response text
-    const baselineCount = await page.locator(this.cfg.responseSelectors[0]).count().catch(() => 0);
+    await this.typeInto(page, input, prompt, signal);
+
     const baseline = await this.readResponseText(page);
+    const baselineCount = await this.countResponses(page);
 
-    // submit
-    const submit = await this.findSubmit(page);
-    if (submit) {
-      await submit.click().catch(() => {});
-    } else {
-      await input.press("Enter").catch(() => {});
-    }
+    await this.submit(page, input);
+    signal?.throwIfAborted();
 
-    // poll until the answer stabilizes, then emit it once
-    let lastText = baseline;
-    let stableCount = 0;
-    const maxWait = 120000;
-    const start = Date.now();
-    while (Date.now() - start < maxWait) {
+    this.lastConversationKey = key;
+    this.lastMessageCount = req.messages.length;
+
+    const tracker = new DeltaTracker();
+    let firstChunk = true;
+    const startedAt = Date.now();
+    let lastCandidate = "";
+    let stablePolls = 0;
+    let newBubble = false;
+
+    while (true) {
       if (signal?.aborted) break;
-      await page.waitForTimeout(400);
-      const current = await this.readResponseText(page);
-      const currentCount = await page.locator(this.cfg.responseSelectors[0]).count().catch(() => 0);
-      if (current && current !== lastText) {
-        lastText = current;
-        stableCount = 0;
-      } else if (current) {
-        stableCount++;
-        if (stableCount >= 4 && lastText && lastText !== baseline) break;
-        if (stableCount >= 4 && currentCount > baselineCount) break;
+
+      if (Date.now() - startedAt > this.opts.streamMaxWaitMs) {
+        if (!tracker.hasEmitted) {
+          throw new ProviderError(`${this.id} did not answer within ${this.opts.streamMaxWaitMs}ms`, 504);
+        }
+        break;
+      }
+
+      await sleep(this.opts.streamPollMs, signal);
+
+      const count = await this.countResponses(page);
+      if (count > baselineCount) newBubble = true;
+      const raw = await this.readResponseText(page);
+      const candidate = newBubble ? raw : stripBaseline(raw, baseline);
+
+      // Rate-limit / busy messages must retry instead of being shown as answers.
+      if (!tracker.hasEmitted && this.isBusy(candidate)) {
+        throw new ServerBusyError(`${this.id} reported: ${candidate.slice(0, 120)}`);
+      }
+
+      if (candidate === lastCandidate) {
+        stablePolls++;
+      } else {
+        stablePolls = 0;
+        lastCandidate = candidate;
+      }
+
+      const delta = tracker.push(candidate);
+      if (delta) {
+        // Attach the role to the first content delta so nothing is sent before
+        // the answer actually starts (retries must not duplicate frames).
+        yield this.makeChunk(
+          id,
+          created,
+          model,
+          firstChunk ? { role: "assistant", content: delta } : { content: delta }
+        );
+        firstChunk = false;
+      }
+
+      if (tracker.hasEmitted && stablePolls >= this.opts.streamIdlePolls) break;
+
+      const idleWithoutAnswer = Date.now() - startedAt > this.opts.streamStartTimeoutMs;
+      if (!tracker.hasEmitted && stablePolls >= this.opts.streamIdlePolls && idleWithoutAnswer) {
+        throw new ProviderError(
+          `${this.id} accepted the prompt but produced no answer`,
+          504,
+          "The site may have changed. Update the selectors via SITE_OVERRIDES or log in again."
+        );
       }
     }
 
-    const finalCount = await page.locator(this.cfg.responseSelectors[0]).count().catch(() => 0);
-    const finalText = await this.readResponseText(page) || lastText;
-    let toEmit = finalText;
-    if (finalCount <= baselineCount && baseline && finalText.startsWith(baseline)) {
-      toEmit = finalText.slice(baseline.length).trim();
-    }
-    if (toEmit) {
-      yield {
+    const finalRaw = await this.readResponseText(page).catch(() => "");
+    const finalCandidate = newBubble ? finalRaw : stripBaseline(finalRaw, baseline);
+    const tail = tracker.flush(finalCandidate);
+    if (tail) {
+      yield this.makeChunk(
         id,
-        object: "chat.completion.chunk",
         created,
         model,
-        choices: [{ index: 0, delta: { role: "assistant", content: toEmit }, finish_reason: null }],
-      };
+        firstChunk ? { role: "assistant", content: tail } : { content: tail }
+      );
+      firstChunk = false;
     }
 
-    yield {
+    if (tracker.hasDiverged) {
+      log.warn(`[${this.id}] answer was re-rendered mid-stream; output may be incomplete`);
+    }
+
+    yield this.makeChunk(id, created, model, {}, "stop");
+  }
+
+  private makeChunk(
+    id: string,
+    created: number,
+    model: string,
+    delta: { role?: "assistant"; content?: string },
+    finish: ChatChunk["choices"][number]["finish_reason"] = null
+  ): ChatChunk {
+    return {
       id,
       object: "chat.completion.chunk",
       created,
       model,
-      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      choices: [{ index: 0, delta, finish_reason: finish }],
     };
   }
 
-  private async readResponseText(page: Page): Promise<string> {
-    for (const sel of this.cfg.responseSelectors) {
-      try {
-        const loc = page.locator(sel);
-        const count = await loc.count();
-        if (count > 0) {
-          for (let i = count - 1; i >= 0; i--) {
-            const t = (await loc.nth(i).innerText().catch(() => "")).trim();
-            if (t) return t;
-          }
+  private async openChatPage(signal?: AbortSignal): Promise<Page> {
+    const page = await this.getPage();
+
+    if (await this.findInput(page)) return page;
+
+    for (const url of this.cfg.chatUrls) {
+      signal?.throwIfAborted();
+      await page.goto(url, { waitUntil: "networkidle", timeout: 45_000 }).catch(() => {});
+      await page.waitForTimeout(1_500);
+      await this.dismissCookieBanner(page);
+      if (await this.findInput(page)) return page;
+    }
+
+    signal?.throwIfAborted();
+    await page.goto(this.cfg.baseUrl, { waitUntil: "networkidle", timeout: 45_000 }).catch(() => {});
+    await page.waitForTimeout(1_500);
+    await this.dismissCookieBanner(page);
+    if (await this.findInput(page)) return page;
+
+    if (this.cfg.credentials?.user && this.cfg.credentials?.pass && this.cfg.loginUrl) {
+      await this.autoLogin(page);
+      for (const url of this.cfg.chatUrls) {
+        await page.goto(url, { waitUntil: "networkidle", timeout: 45_000 }).catch(() => {});
+        await page.waitForTimeout(1_500);
+        if (await this.findInput(page)) return page;
+      }
+    }
+
+    if (!(await this.findInput(page))) {
+      throw new LoginRequiredError(
+        `not signed in to ${this.id} (no chat input found at ${page.url()})`,
+        this.cfg.loginHint
+      );
+    }
+    return page;
+  }
+
+  private async getPage(): Promise<Page> {
+    if (this.page && !this.page.isClosed()) return this.page;
+    this.page = await this.bm.page(this.id);
+    return this.page;
+  }
+
+  private async autoLogin(page: Page): Promise<void> {
+    const user = this.cfg.credentials?.user;
+    const pass = this.cfg.credentials?.pass;
+    if (!user || !pass || !this.cfg.loginUrl) return;
+
+    log.info(`[${this.id}] attempting password login for ${user}`);
+    try {
+      await page.goto(this.cfg.loginUrl, { waitUntil: "networkidle", timeout: 45_000 });
+      await page.waitForTimeout(1_500);
+      const userInput = page.locator(this.cfg.usernameSelector ?? "input[name='account']").first();
+      const passInput = page.locator(this.cfg.passwordSelector ?? "input[name='password']").first();
+      await userInput.fill(user, { timeout: 15_000 });
+      await passInput.fill(pass, { timeout: 15_000 });
+
+      const consent = page.locator("input[type='checkbox']").first();
+      if (await consent.isVisible().catch(() => false)) await consent.check().catch(() => {});
+
+      const cookieButton = page.locator("button:has-text('Accept cookies')").first();
+      if (await cookieButton.isVisible().catch(() => false)) await cookieButton.click().catch(() => {});
+
+      const button = page.locator(this.cfg.loginButtonSelector ?? "button:has-text('Sign in')").first();
+      await button.click({ timeout: 15_000 });
+      await page.waitForTimeout(5_000);
+
+      const agree = page.locator("button:has-text('Agree')").first();
+      if (await agree.isVisible().catch(() => false)) {
+        await agree.click().catch(() => {});
+        await page.waitForTimeout(5_000);
+      }
+    } catch (error) {
+      log.warn(`[${this.id}] automatic login failed: ${describe(error)}`);
+    }
+  }
+
+  private async dismissCookieBanner(page: Page): Promise<void> {
+    for (const label of ["Accept All", "Accept cookies", "Accept", "Agree"]) {
+      const button = page.locator("button", { hasText: label }).first();
+      if (await button.isVisible().catch(() => false)) {
+        await button.click().catch(() => {});
+        await page.waitForTimeout(400);
+        return;
+      }
+    }
+  }
+
+  private async startNewChat(page: Page): Promise<void> {
+    this.lastConversationKey = "";
+    this.lastMessageCount = 0;
+    for (const selector of this.cfg.newChatSelectors ?? []) {
+      const button = page.locator(selector).first();
+      if (await button.isVisible().catch(() => false)) {
+        await button.click().catch(() => {});
+        await page.waitForTimeout(1_000);
+        return;
+      }
+    }
+    log.debug(`[${this.id}] no new-conversation button matched; continuing current chat`);
+  }
+
+  private async findInput(page: Page): Promise<Locator | null> {
+    for (const selector of this.cfg.inputSelectors) {
+      const locator = page.locator(selector);
+      const count = await locator.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const element = locator.nth(i);
+        if (await element.isVisible().catch(() => false)) return element;
+      }
+    }
+    return null;
+  }
+
+  private async findSubmit(page: Page): Promise<Locator | null> {
+    for (const selector of this.cfg.submitSelectors) {
+      const locator = page.locator(selector);
+      const count = await locator.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const element = locator.nth(i);
+        if ((await element.isVisible().catch(() => false)) && (await element.isEnabled().catch(() => false))) {
+          return element;
         }
-      } catch {}
+      }
+    }
+    return null;
+  }
+
+  private async typeInto(
+    page: Page,
+    input: Locator,
+    prompt: string,
+    signal?: AbortSignal
+  ): Promise<void> {
+    await input.click({ timeout: 15_000 }).catch(() => {});
+    signal?.throwIfAborted();
+
+    try {
+      await input.fill(prompt, { timeout: 30_000 });
+    } catch {
+      // Rich-text editors reject fill(); focus and insert the text instead.
+      await input.click({ timeout: 15_000 }).catch(() => {});
+      await page.keyboard.insertText(prompt);
+    }
+
+    const typed = await input.inputValue().catch(() => prompt);
+    if (typed.trim().length === 0) {
+      throw new ProviderError(
+        `could not type into the ${this.id} chat box`,
+        502,
+        "The input selector probably changed. Patch it with SITE_OVERRIDES."
+      );
+    }
+    await page.waitForTimeout(300);
+  }
+
+  private async submit(page: Page, input: Locator): Promise<void> {
+    const button = await this.findSubmit(page);
+    if (button) {
+      await button.click({ timeout: 15_000 });
+      return;
+    }
+    await input.press("Enter");
+    // Some UIs need a second Enter after the first enables the send button.
+    await page.waitForTimeout(400);
+    const fallback = await this.findSubmit(page);
+    if (fallback) await fallback.click({ timeout: 5_000 }).catch(() => {});
+  }
+
+  private async countResponses(page: Page): Promise<number> {
+    let total = 0;
+    for (const selector of this.cfg.responseSelectors) {
+      total += await page.locator(selector).count().catch(() => 0);
+    }
+    return total;
+  }
+
+  private async readResponseText(page: Page): Promise<string> {
+    for (const selector of this.cfg.responseSelectors) {
+      try {
+        const locator = page.locator(selector);
+        const count = await locator.count();
+        for (let i = count - 1; i >= 0; i--) {
+          const text = (await locator.nth(i).innerText().catch(() => "")).trimEnd();
+          if (text.trim()) return text;
+        }
+      } catch {
+        // selector not present on this page state
+      }
     }
     return "";
   }
+
+  private isBusy(text: string): boolean {
+    // Busy notices are short banners; a long answer that happens to mention
+    // "try again later" must not be retried.
+    if (!text || text.length > 300) return false;
+    const lower = text.toLowerCase();
+    return this.busyPatterns.some((pattern) => lower.includes(pattern.toLowerCase()));
+  }
+
+  private isRetryable(error: unknown): boolean {
+    if (error instanceof ServerBusyError) return true;
+    if (error instanceof ProviderError) return error.statusCode >= 500;
+    const message = describe(error);
+    return /net::|ECONNRESET|ECONNREFUSED|socket hang up|Target (page|closed)|browser has been closed|Timeout/i.test(
+      message
+    );
+  }
+
+  private abortError(
+    combined: AbortSignal,
+    caller?: AbortSignal,
+    timeout?: AbortSignal
+  ): Error {
+    if (timeout?.aborted && timeout.reason instanceof Error) return timeout.reason;
+    if (caller?.aborted) {
+      const reason = caller.reason;
+      return reason instanceof Error ? reason : new RequestAbortedError();
+    }
+    const reason = combined.reason;
+    return reason instanceof Error ? reason : new RequestAbortedError();
+  }
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
