@@ -1,12 +1,9 @@
 node_modules/
 dist/
-.mimo/
-explore/
-*.log
 .env
 .env.local
+*.log
 mimo/
-mock/
 explore/
 explore-*.ts
 debug-*.ts

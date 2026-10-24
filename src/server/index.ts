@@ -3,7 +3,6 @@ import cors from "@fastify/cors";
 import { config } from "../config/index.js";
 import { PlaywrightBrowserManager } from "../browser/manager.js";
 import { createMimoProvider } from "../providers/mimo.js";
-import { MockProvider } from "../providers/mock.js";
 import type { Provider } from "../core/types.js";
 
 export async function buildServer() {
@@ -11,7 +10,7 @@ export async function buildServer() {
   await app.register(cors, { origin: true });
 
   const bm = new PlaywrightBrowserManager({ userDataRoot: config.profileRoot, headless: config.headless });
-  const providers: Provider[] = [createMimoProvider(bm), new MockProvider()];
+  const providers: Provider[] = [createMimoProvider(bm)];
   const providerMap = new Map(providers.map((p) => [p.id, p]));
 
   // init providers
@@ -43,7 +42,7 @@ export async function buildServer() {
   app.post("/v1/chat/completions", async (req, reply) => {
     if (!auth(req, reply)) return;
     const body = req.body as any;
-    const modelStr: string = body.model ?? "mock/mock-gpt";
+    const modelStr: string = body.model ?? "mimo/mimo-v2.6-pro";
     const [providerId, ...rest] = modelStr.split("/");
     const modelId = rest.join("/") || modelStr;
     const provider = providerMap.get(providerId) ?? providers.find((p) => p.models.some((m) => m.id === modelStr));
