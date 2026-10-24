@@ -7,8 +7,16 @@ import { PlaywrightBrowserManager } from "../browser/manager.js";
 import { createProviders } from "../providers/registry.js";
 import { RequestAbortedError, ValidationError, toErrorBody } from "../core/errors.js";
 import { encodeSSE, encodeSSEError, SSE_DONE } from "../core/sse.js";
-import { estimateTokens } from "../core/utils.js";
-import { parseToolCalls, stripToolCalls, toOpenAIToolCalls } from "../core/toolcalls.js";
+import { estimateTokens, newId } from "../core/utils.js";
+import {
+  parseToolCallsDetailed,
+  stripToolCalls,
+  toOpenAIToolCalls,
+  ToolCallSuppressor,
+  toolNamesFromTools,
+  toolSchemasFromTools,
+  type ParsedToolCall,
+} from "../core/toolcalls.js";
 import { countPromptTokens } from "../core/prompt.js";
 import { VERSION } from "../core/version.js";
 import type { ChatCompletionRequest, ChatMessage, Provider } from "../core/types.js";
@@ -287,60 +295,127 @@ async function streamCompletion(
   reply.raw.write(": web-agents-to stream\n\n");
 
   const includeUsage = request.stream_options?.include_usage === true;
-  const wantTools = Boolean(config.nativeTools && request.tools?.length);
+  const toolsEnabled = Boolean(config.nativeTools && request.tools?.length);
+  const allowedTools = toolNamesFromTools(request.tools);
+  const toolSchemas = toolSchemasFromTools(request.tools);
+
   let streamed = "";
+  let id = newId("chatcmpl");
+  let created = Math.floor(Date.now() / 1000);
+  let roleSent = false;
+
+  // Long generation steps must not look like a dead socket to the client.
+  const heartbeat = setInterval(() => {
+    if (!reply.raw.writableEnded) reply.raw.write(": ping\n\n");
+  }, 15_000);
+  heartbeat.unref?.();
+
+  const writeText = (text: string) => {
+    if (!text) return;
+    streamed += text;
+    reply.raw.write(
+      encodeSSE({
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model: requestedModel,
+        choices: [
+          {
+            index: 0,
+            delta: roleSent ? { content: text } : { role: "assistant", content: text },
+            finish_reason: null,
+          },
+        ],
+      })
+    );
+    roleSent = true;
+  };
+
+  const writeFinish = (reason: "stop" | "tool_calls") => {
+    // A dedicated finish frame: clients (and opencode's parser) reject any
+    // content delta that arrives after a finish_reason.
+    reply.raw.write(
+      encodeSSE({
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model: requestedModel,
+        choices: [{ index: 0, delta: {}, finish_reason: reason }],
+      })
+    );
+  };
 
   try {
-    if (wantTools) {
-      // Tool calls only exist once the whole block was generated, so buffer.
-      let text = "";
-      let meta = { id: "", created: 0 };
-      for await (const chunk of provider.chat(request, signal)) {
-        meta = { id: chunk.id, created: chunk.created };
-        text += chunk.choices[0]?.delta?.content ?? "";
-      }
-      streamed = text;
-      const calls = parseToolCalls(text);
-      if (calls.length > 0) {
+    const suppressor = toolsEnabled ? new ToolCallSuppressor() : undefined;
+
+    for await (const chunk of provider.chat(request, signal)) {
+      id = chunk.id || id;
+      created = chunk.created || created;
+      const delta = chunk.choices[0]?.delta?.content;
+      if (!delta) continue;
+
+      if (!suppressor) {
+        streamed += delta;
         reply.raw.write(
           encodeSSE({
-            id: meta.id,
-            object: "chat.completion.chunk",
-            created: meta.created,
+            ...chunk,
             model: requestedModel,
             choices: [
               {
                 index: 0,
-                delta: { role: "assistant", content: null, tool_calls: toNativeDeltas(calls) },
-                finish_reason: "tool_calls",
+                delta: roleSent ? { content: delta } : { role: "assistant", content: delta },
+                finish_reason: null,
               },
             ],
           })
         );
-      } else {
-        reply.raw.write(
-          encodeSSE({
-            id: meta.id,
-            object: "chat.completion.chunk",
-            created: meta.created,
-            model: requestedModel,
-            choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }],
-          })
-        );
-        reply.raw.write(
-          encodeSSE({
-            id: meta.id,
-            object: "chat.completion.chunk",
-            created: meta.created,
-            model: requestedModel,
-            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-          })
-        );
+        roleSent = true;
+        continue;
       }
+
+      writeText(suppressor.push(delta));
+    }
+
+    if (!suppressor) {
+      // Plain text path: deltas above, terminator here.
+      writeFinish("stop");
     } else {
-      for await (const chunk of provider.chat(request, signal)) {
-        streamed += chunk.choices[0]?.delta?.content ?? "";
-        reply.raw.write(encodeSSE({ ...chunk, model: requestedModel }));
+      writeText(suppressor.finish());
+
+      const { calls, dropped } = parseToolCallsDetailed(suppressor.fullText, {
+        allowedTools,
+        toolSchemas,
+      });
+
+      if (calls.length > 0) {
+        for (const [index, call] of calls.entries()) {
+          reply.raw.write(
+            encodeSSE({
+              id,
+              object: "chat.completion.chunk",
+              created,
+              model: requestedModel,
+              choices: [
+                {
+                  index: 0,
+                  delta: { tool_calls: [toToolCallDelta(call, index)] },
+                  finish_reason: null,
+                },
+              ],
+            })
+          );
+        }
+        writeFinish("tool_calls");
+      } else {
+        if (dropped.length > 0) {
+          writeText(toolDropNote(dropped));
+        } else if (/<tool_call[\s>]/i.test(suppressor.fullText)) {
+          // Truncated block: no closing tag, so nothing can be executed.
+          writeText(
+            "\n[tool call was incomplete — the block was not closed. Reply again with one complete block.]"
+          );
+        }
+        writeFinish("stop");
       }
     }
 
@@ -349,9 +424,9 @@ async function streamCompletion(
       const completionTokens = estimateTokens(streamed);
       reply.raw.write(
         encodeSSE({
-          id: `chatcmpl-${Date.now()}`,
+          id,
           object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000),
+          created,
           model: requestedModel,
           choices: [],
           usage: {
@@ -368,6 +443,7 @@ async function streamCompletion(
       reply.raw.write(encodeSSEError(body.error.message, body.error.hint));
     }
   } finally {
+    clearInterval(heartbeat);
     if (!reply.raw.writableEnded) {
       reply.raw.write(SSE_DONE);
       reply.raw.end();
@@ -375,13 +451,26 @@ async function streamCompletion(
   }
 }
 
-function toNativeDeltas(calls: ReturnType<typeof parseToolCalls>) {
-  return toOpenAIToolCalls(calls).map((call, index) => ({
+/** One OpenAI tool-call delta. `id`/`type`/`name` must be complete per call. */
+function toToolCallDelta(call: ParsedToolCall, index: number) {
+  return {
     index,
-    id: call.id,
-    type: call.type,
-    function: call.function,
-  }));
+    id: newId("call", "_"),
+    type: "function" as const,
+    function: {
+      name: call.name,
+      arguments: JSON.stringify(call.args ?? {}),
+    },
+  };
+}
+
+/** Surface a rejected tool call to the model instead of failing the whole step. */
+function toolDropNote(dropped: ParsedToolCall[]): string {
+  const details = dropped
+    .slice(0, 3)
+    .map((call) => `${call.name}: ${call.parseError ?? "invalid tool call"}`)
+    .join("; ");
+  return `\n[tool call ignored — ${details}. Retry with one of: valid JSON arguments and a declared tool name.]`;
 }
 
 async function collectCompletion(
@@ -391,21 +480,34 @@ async function collectCompletion(
   signal: AbortSignal
 ) {
   let content = "";
-  let id = `chatcmpl-${Date.now()}`;
+  let id = newId("chatcmpl");
   let created = Math.floor(Date.now() / 1000);
 
   for await (const chunk of provider.chat(request, signal)) {
-    id = chunk.id;
-    created = chunk.created;
+    id = chunk.id || id;
+    created = chunk.created || created;
     content += chunk.choices[0]?.delta?.content ?? "";
   }
 
-  const toolCalls = config.nativeTools && request.tools?.length ? parseToolCalls(content) : [];
-  const promptTokens = countPromptTokens(request.messages as ChatMessage[]);
+  const toolsEnabled = Boolean(config.nativeTools && request.tools?.length);
+  const { calls, dropped } = toolsEnabled
+    ? parseToolCallsDetailed(content, {
+        allowedTools: toolNamesFromTools(request.tools),
+        toolSchemas: toolSchemasFromTools(request.tools),
+      })
+    : { calls: [], dropped: [] };
 
-  if (toolCalls.length > 0) {
-    const prose = stripToolCalls(content);
-    const completionTokens = estimateTokens(content);
+  const promptTokens = countPromptTokens(request.messages as ChatMessage[]);
+  const usage = (text: string) => {
+    const completionTokens = estimateTokens(text);
+    return {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens,
+    };
+  };
+
+  if (calls.length > 0) {
     return {
       id,
       object: "chat.completion" as const,
@@ -416,21 +518,17 @@ async function collectCompletion(
           index: 0,
           message: {
             role: "assistant" as const,
-            content: prose || null,
-            tool_calls: toOpenAIToolCalls(toolCalls),
+            content: stripToolCalls(content) || null,
+            tool_calls: toOpenAIToolCalls(calls),
           },
           finish_reason: "tool_calls" as const,
         },
       ],
-      usage: {
-        prompt_tokens: promptTokens,
-        completion_tokens: completionTokens,
-        total_tokens: promptTokens + completionTokens,
-      },
+      usage: usage(content),
     };
   }
 
-  const completionTokens = estimateTokens(content);
+  const prose = dropped.length > 0 ? `${stripToolCalls(content)}${toolDropNote(dropped)}` : content;
   return {
     id,
     object: "chat.completion" as const,
@@ -439,14 +537,10 @@ async function collectCompletion(
     choices: [
       {
         index: 0,
-        message: { role: "assistant" as const, content },
+        message: { role: "assistant" as const, content: prose },
         finish_reason: "stop" as const,
       },
     ],
-    usage: {
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      total_tokens: promptTokens + completionTokens,
-    },
+    usage: usage(content),
   };
 }

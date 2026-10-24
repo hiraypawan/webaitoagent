@@ -18,6 +18,7 @@ Usage:
   WEB chat <prompt>       One-shot chat
   WEB start               Start the API server only
   WEB models              List available models
+  WEB doctor              Diagnose the API + print the opencode config
   WEB login               Open a browser to sign in to the provider
   WEB logout              Close the provider browser session
   WEB help                Show this help
@@ -94,6 +95,9 @@ switch (command) {
     break;
   case "models":
     run("src/cli/models.ts", rest);
+    break;
+  case "doctor":
+    run("src/cli/doctor.ts", rest);
     break;
   case "version":
   case "--version":

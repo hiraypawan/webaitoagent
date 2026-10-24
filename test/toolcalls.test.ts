@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   hasToolCalls,
   parseToolCalls,
+  parseToolCallsDetailed,
   stripToolCalls,
   toOpenAIToolCalls,
 } from "../src/core/toolcalls.js";
@@ -36,10 +37,23 @@ describe("parseToolCalls", () => {
     assert.deepEqual(calls[1]!.args, { y: 2 });
   });
 
-  it("flags invalid JSON instead of throwing", () => {
-    const calls = parseToolCalls('<tool_call name="bash">{oops}</tool_call>');
+  it("drops calls whose arguments cannot be parsed", () => {
+    const result = parseToolCallsDetailed('<tool_call name="bash">{oops}</tool_call>');
+    assert.equal(result.calls.length, 0);
+    assert.equal(result.dropped.length, 1);
+    assert.match(result.dropped[0]!.parseError ?? "", /valid JSON/);
+    assert.deepEqual(parseToolCalls('<tool_call name="bash">{oops}</tool_call>'), []);
+  });
+
+  it("repairs the usual JSON mistakes", () => {
+    const calls = parseToolCalls(
+      "<tool_call name=\"bash\">{'command': 'ls -la',}</tool_call>"
+    );
     assert.equal(calls.length, 1);
-    assert.match(calls[0]!.parseError ?? "", /not valid JSON/);
+    assert.deepEqual(calls[0]!.args, { command: "ls -la" });
+
+    const unquoted = parseToolCalls('<tool_call name="bash">{command: "pwd"}</tool_call>');
+    assert.deepEqual(unquoted[0]!.args, { command: "pwd" });
   });
 
   it("returns nothing for prose", () => {
