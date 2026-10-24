@@ -106,6 +106,7 @@ export async function createServer(options: ServerOptions = {}): Promise<BuiltSe
       userDataRoot: config.profileRoot,
       headless: options.headless ?? config.headless,
       userAgent: config.userAgent,
+      executablePath: config.chromiumExecutable,
     });
   const providers = options.providers ?? createProviders(bm);
   const providerMap = new Map(providers.map((provider) => [provider.id, provider]));

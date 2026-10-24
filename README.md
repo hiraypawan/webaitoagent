@@ -195,6 +195,7 @@ Copy `.env.example` to `.env`. The important ones:
 | `HEADLESS` | `true` | `false` shows the browser |
 | `PROFILE_ROOT` | `~/.web-agents-to/profiles` | Login profiles |
 | `SITE_OVERRIDES` | – | JSON patch for selectors when a site changes |
+| `CHROMIUM_EXECUTABLE` | – | Use an existing Chromium binary instead of Playwright's download |
 | `MIMO_USER` / `MIMO_PASS` | – | Optional Xiaomi password auto-login |
 | `REQUEST_TIMEOUT_MS` | `180000` | Whole-request budget |
 | `STREAM_POLL_MS` | `250` | DOM polling interval |
@@ -247,6 +248,20 @@ npm start           # run the built server
 
 CI runs typecheck, tests and the build on Node 20 and 22 (see `.github/workflows/ci.yml`).
 
+The browser suite (`test/browser-e2e.test.ts`) drives the real provider against
+`test/fixtures/mock-chat.html`, a local stand-in for the provider UI. It needs a
+Chromium binary and **skips itself** when none is available:
+
+```bash
+npx playwright install chromium          # or point at an existing binary
+PLAYWRIGHT_EXECUTABLE_PATH=/usr/bin/chromium npm test
+```
+
+That suite covers the parts unit tests cannot: selector handling, incremental
+DOM streaming, answer-baseline stripping (including single-bubble UIs),
+conversation resets, busy-message detection and serialisation. An earlier audit
+found three real defects through it; see [`docs/AUDIT.md`](docs/AUDIT.md).
+
 ## Project layout
 
 | Path | Purpose |
@@ -259,6 +274,8 @@ CI runs typecheck, tests and the build on Node 20 and 22 (see `.github/workflows
 | `extension` | Manifest V3 popup + floating panel |
 | `test` | Unit + HTTP-level tests with an injected fake provider |
 | `docs/ARCHITECTURE.md` | Design and data flow |
+| `docs/OPENCODE.md` | opencode setup, wire contract, troubleshooting |
+| `docs/AUDIT.md` | Audit findings, fixes and what could not be verified |
 
 ## Known limitations
 

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Mock AI Studio</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 24px; }
+      #messages { margin-top: 16px; }
+      .user-msg { background: #eef; padding: 6px; margin: 6px 0; }
+      .markdown-prose { background: #f6f6f6; padding: 6px; margin: 6px 0; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>Mock AI Studio</h1>
+    <button id="new-chat" aria-label="New conversation">New conversation</button>
+    <textarea id="prompt" rows="3" cols="60" placeholder="Ask anything"></textarea>
+    <button id="send">Send</button>
+    <div id="messages"></div>
+
+    <script>
+      // Minimal stand-in for the provider UI: a textarea, a send button, one
+      // growing answer bubble per turn, and a "new conversation" button.
+      // Test hooks are exposed on window for assertions.
+      window.__received = [];
+      window.__newChats = 0;
+      window.__turns = 0;
+      // Some providers keep one growing bubble instead of adding a new one;
+      // ?reuse=1 exercises that rendering style.
+      const reuseBubble = new URLSearchParams(location.search).get("reuse") === "1";
+
+      const input = document.getElementById("prompt");
+      const send = document.getElementById("send");
+      const messages = document.getElementById("messages");
+
+      function replyFor(prompt) {
+        if (prompt.includes("TOOLTEST")) {
+          return 'Let me check the directory.\n<tool_call name="bash">{"command": "ls -la"}</tool_call>';
+        }
+        if (prompt.includes("LONG")) {
+          return "BEGIN " + "x".repeat(400) + " END";
+        }
+        if (prompt.includes("BUSY")) {
+          return "服务器繁忙，请稍后再试";
+        }
+        if (prompt.includes("ECHO:")) {
+          return prompt.slice(prompt.indexOf("ECHO:"));
+        }
+        return "You said: " + prompt.slice(0, 120);
+      }
+
+      function streamInto(node, text) {
+        let i = 0;
+        const timer = setInterval(() => {
+          node.textContent = text.slice(0, (i += 6));
+          if (i >= text.length) clearInterval(timer);
+        }, 12);
+      }
+
+      function submit() {
+        const prompt = input.value;
+        if (!prompt.trim()) return;
+        window.__received.push(prompt);
+        window.__turns += 1;
+        input.value = "";
+
+        const userNode = document.createElement("div");
+        userNode.className = "user-msg";
+        userNode.textContent = prompt;
+        messages.appendChild(userNode);
+
+        let answer = reuseBubble ? messages.querySelector(".markdown-prose:last-of-type") : null;
+        if (!answer) {
+          answer = document.createElement("div");
+          answer.className = "markdown-prose";
+          messages.appendChild(answer);
+        }
+        if (reuseBubble) {
+          const previous = answer.textContent || "";
+          streamInto({ set textContent(value) { answer.textContent = previous + value; } }, replyFor(prompt));
+        } else {
+          streamInto(answer, replyFor(prompt));
+        }
+      }
+
+      send.addEventListener("click", submit);
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          submit();
+        }
+      });
+
+      document.getElementById("new-chat").addEventListener("click", () => {
+        window.__newChats += 1;
+        messages.innerHTML = "";
+      });
+    </script>
+  </body>
+</html>

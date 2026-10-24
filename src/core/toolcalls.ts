@@ -70,6 +70,18 @@ const DEFAULT_ALIASES: Record<string, string> = {
   web_fetch: "webfetch",
 };
 
+/** Names models copy out of instructions instead of real tool names. */
+const PLACEHOLDER_NAMES = new Set([
+  "name",
+  "tool",
+  "tool_name",
+  "toolname",
+  "your_tool",
+  "toolname_here",
+  "function",
+  "example",
+]);
+
 const PARAM_ALIASES: Record<string, string[]> = {
   command: ["cmd", "script", "shell_command", "command_line"],
   filePath: ["file_path", "filepath", "path", "filename", "file"],
@@ -127,6 +139,9 @@ export function parseToolCallsDetailed(
       dropped.push({ name: "(unknown)", args: {}, raw: raw.raw, parseError: "no tool name" });
       continue;
     }
+
+    // `name="NAME"` inside an example is instruction text, not a call.
+    if (PLACEHOLDER_NAMES.has(name.trim().toLowerCase())) continue;
 
     const resolved = resolveToolName(name, options);
     if (!resolved) {

@@ -80,3 +80,22 @@ describe("toOpenAIToolCalls", () => {
     assert.deepEqual(JSON.parse(calls[0]!.function.arguments), { command: "ls" });
   });
 });
+
+describe("placeholder tool names", () => {
+  it("ignores the example syntax copied out of instructions", () => {
+    const text =
+      'Call one with <tool_call name="NAME">{"param":"value"}</tool_call> and stop.';
+    const result = parseToolCallsDetailed(text, { allowedTools: ["bash", "read"] });
+    assert.equal(result.calls.length, 0);
+    assert.equal(result.dropped.length, 0, "an example must not be reported as a failed call");
+  });
+
+  it("still reports genuinely unknown tools", () => {
+    const result = parseToolCallsDetailed('<tool_call name="delete_all">{}</tool_call>', {
+      allowedTools: ["bash"],
+    });
+    assert.equal(result.calls.length, 0);
+    assert.equal(result.dropped.length, 1);
+    assert.match(result.dropped[0]!.parseError ?? "", /unknown tool/);
+  });
+});

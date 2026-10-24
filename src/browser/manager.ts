@@ -11,6 +11,8 @@ export interface BrowserManagerOptions {
   userDataRoot?: string;
   headless?: boolean;
   userAgent?: string;
+  /** Path to a Chromium binary (containers, CI, Lambda-style images). */
+  executablePath?: string;
 }
 
 /**
@@ -36,6 +38,7 @@ export class PlaywrightBrowserManager {
       userAgent:
         opts.userAgent ??
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      executablePath: opts.executablePath ?? "",
     };
   }
 
@@ -119,6 +122,7 @@ export class PlaywrightBrowserManager {
         headless,
         viewport: headless ? { width: 1366, height: 900 } : { width: 1280, height: 800 },
         userAgent: this.opts.userAgent,
+        ...(this.opts.executablePath ? { executablePath: this.opts.executablePath } : {}),
         locale: "en-US",
         args: ["--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check"],
       });
