@@ -1,3 +1,4 @@
+import { BUSY_PATTERNS } from "../core/page-signals.js";
 import { BrowserChatProvider, type SiteConfig } from "./base.js";
 import type { PlaywrightBrowserManager } from "../browser/manager.js";
 import type { ProviderModel } from "../core/types.js";
@@ -28,7 +29,7 @@ const baseCfg: SiteConfig = {
   passwordSelector: "input[name='password']",
   loginButtonSelector: "button:has-text('Sign in')",
   credentials: { user: config.mimoUser, pass: config.mimoPass },
-  busyPatterns: ["服务器繁忙", "服务繁忙", "系统繁忙", "server is busy", "too many requests"],
+  busyPatterns: BUSY_PATTERNS,
 };
 
 export function mimoSiteConfig(): SiteConfig {

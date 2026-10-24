@@ -74,6 +74,52 @@ To force a shell: `set AGENT_SHELL=powershell` before starting `npm run dev`
 
 ---
 
+## opencode says "tool call could not be read"
+
+The model replied but the bridge could not understand its markup. The message
+now shows what it wrote and the shape that is expected. Nothing to do — the next
+turn usually succeeds, and the parser accepts the common formats (Qwen/GLM XML,
+`[TOOL_CALLS]`, OpenAI arrays, unquoted attributes).
+
+If it repeats every turn, add `REASONING_SELECTORS`? No — this one is about tool
+calls. Capture one raw reply and it can be supported explicitly:
+
+```bash
+WEB chat "list the files" --debug
+```
+
+---
+
+## The model's "Thinking..." text shows up in the answer
+
+MiMo renders its chain of thought in the answer container. The bridge strips it:
+
+1. removes the reasoning element in the DOM (defaults + `REASONING_SELECTORS`),
+2. drops a leading `Thinking…` / `思考中` section if it leaked into the text.
+
+If some reasoning still appears, the site used different markup. Add a selector
+to `.env` (comma separated, CSS):
+
+```ini
+REASONING_SELECTORS=[class*='cot'],[data-testid*='thought']
+```
+
+---
+
+## "The server is already running" / port 8787 in use
+
+Starting `npm run dev` twice is the usual cause, and it is not an error:
+
+```
+The server is already running at http://127.0.0.1:8787
+Nothing to do: use the running instance, or stop it first.
+```
+
+If a *different* program holds the port, the message says so — start on another
+one with `set PORT=8788` (Windows) or `PORT=8788 npm run dev`.
+
+---
+
 ## "connection refused" / opencode cannot reach the model
 
 The little local server is not running. Start it and leave that window open:

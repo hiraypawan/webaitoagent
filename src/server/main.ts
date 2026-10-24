@@ -1,6 +1,24 @@
 import { buildServer } from "./index.js";
 import { config, isInsecureExposure, isLoopbackHost } from "../config/index.js";
 import { log } from "../core/logger.js";
+
+/** Is something already serving *our* API on this port? */
+async function probeExisting(
+  host: string,
+  port: number
+): Promise<{ version?: string } | undefined> {
+  const probeHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+  try {
+    const response = await fetch(`http://${probeHost}:${port}/health`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!response.ok) return undefined;
+    const body = (await response.json()) as { ok?: boolean; version?: string };
+    return body?.ok ? { version: body.version } : undefined;
+  } catch {
+    return undefined;
+  }
+}
 import { VERSION } from "../core/version.js";
 
 async function main(): Promise<void> {
@@ -32,6 +50,36 @@ async function main(): Promise<void> {
   try {
     await app.listen({ port: config.port, host: config.host });
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EADDRINUSE") {
+      // Almost always the user started `npm run dev` twice. That is not a
+      // failure worth a stack trace: say what is going on and exit cleanly.
+      const existing = await probeExisting(config.host, config.port);
+      await app.close().catch(() => undefined);
+      if (existing) {
+        console.log(
+          [
+            `The server is already running at http://${config.host}:${config.port}`,
+            `  version ${existing.version ?? "unknown"}`,
+            "",
+            "Nothing to do: use the running instance, or stop it first.",
+            "Nothing else needs starting — opencode talks to that instance.",
+          ].join("\n")
+        );
+        process.exit(0);
+      }
+      console.error(
+        [
+          `Port ${config.port} is already used by another program.`,
+          "",
+          "Fix one of these:",
+          `  - use a different port:  set PORT=8788   (then npm run dev)`,
+          "  - find and stop the other program (on Windows: netstat -ano | findstr",
+          `    :${config.port}, then taskkill /PID <pid> /F)`,
+        ].join("\n")
+      );
+      process.exit(1);
+    }
     app.log.error(error);
     process.exit(1);
   }

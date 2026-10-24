@@ -91,6 +91,8 @@ export const config = {
   providerRetryDelayMs: int("PROVIDER_RETRY_DELAY_MS", 2_000, 0),
   maxQueue: int("MAX_QUEUE", 16, 0),
   maxPromptChars: int("MAX_PROMPT_CHARS", 120_000, 1_000),
+  /** Extra CSS selectors for the model's "Thinking…" block (comma separated). */
+  reasoningSelectors: optionalStr("REASONING_SELECTORS"),
   /** Upper bound for automatic growth of the prompt budget. */
   maxPromptCharsCeiling: int("MAX_PROMPT_CHARS_CEILING", 400_000, 1_000),
   /** Let the server translate `<tool_call>` blocks into native `tool_calls`. */
