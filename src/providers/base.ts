@@ -24,7 +24,12 @@ import {
 } from "../core/prompt.js";
 import { contextBudget } from "../core/budget.js";
 import { looksBusy } from "../core/page-signals.js";
-import { cleanAnswer, DEFAULT_REASONING_SELECTORS, parseSelectors } from "../core/thinking.js";
+import {
+  cleanAnswer,
+  DEFAULT_GENERATING_SELECTORS,
+  DEFAULT_REASONING_SELECTORS,
+  parseSelectors,
+} from "../core/thinking.js";
 import { recordRequest, recordTrim } from "../core/context-stats.js";
 import { DeltaTracker, stripBaseline } from "../core/stream.js";
 import { newId, nowSeconds, sleep } from "../core/utils.js";
@@ -453,6 +458,13 @@ export class BrowserChatProvider implements Provider {
         firstChunk = false;
       }
 
+      // The page says it is still working: reset the stability counter so a
+      // pause between paragraphs is never mistaken for the end of the answer.
+      if (stablePolls > 0 && (await this.isGenerating(page))) {
+        stablePolls = 0;
+        lastCandidate = candidate;
+      }
+
       if (tracker.hasEmitted && stablePolls >= this.opts.streamIdlePolls) break;
 
       const idleWithoutAnswer = Date.now() - startedAt > this.opts.streamStartTimeoutMs;
@@ -481,6 +493,15 @@ export class BrowserChatProvider implements Provider {
 
     if (tracker.hasDiverged) {
       log.warn(`[${this.id}] answer was re-rendered mid-stream; output may be incomplete`);
+    }
+
+    const finalText = tracker.text ?? "";
+    const fences = (finalText.match(/```/g) ?? []).length;
+    if (fences % 2 === 1) {
+      log.warn(
+        `[${this.id}] the answer ended inside a code block — it was probably still being written. ` +
+          "Raise STREAM_IDLE_POLLS or STREAM_MAX_WAIT_MS if this happens often."
+      );
     }
 
     // The request completed at the current budget: growth is allowed again.
@@ -773,6 +794,30 @@ export class BrowserChatProvider implements Provider {
       total += await page.locator(selector).count().catch(() => 0);
     }
     return total;
+  }
+
+  private generatingSelectors(): string[] {
+    return parseSelectors(config.generatingSelectors) ?? DEFAULT_GENERATING_SELECTORS;
+  }
+
+  /**
+   * Is the page still writing the answer?
+   *
+   * Text can sit unchanged for a second or two while the model thinks, and
+   * treating that as "finished" cut answers off mid-file. When the site shows a
+   * stop button or aria-busy, keep waiting.
+   */
+  private async isGenerating(page: Page): Promise<boolean> {
+    for (const selector of this.generatingSelectors()) {
+      try {
+        const locator = page.locator(selector);
+        if ((await locator.count()) === 0) continue;
+        if (await locator.first().isVisible().catch(() => false)) return true;
+      } catch {
+        // selector not supported / page navigating
+      }
+    }
+    return false;
   }
 
   private reasoningSelectors(): string[] {

@@ -1,6 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { hasToolCalls, parseToolCallsDetailed, stripToolCalls } from "../src/core/toolcalls.js";
+import {
+  exampleCall,
+  hasToolCalls,
+  hasUnclosedToolCall,
+  isPlaceholderName,
+  parseToolCallsDetailed,
+  stripToolCalls,
+} from "../src/core/toolcalls.js";
 
 const tools = ["bash", "read_file", "write_file", "list_dir", "glob", "grep", "edit"];
 const options = { allowedTools: tools };
@@ -212,5 +219,92 @@ I will now list the files.
     );
     assert.ok(hasToolCalls(text));
     assert.ok(hasToolCalls("<function=bash><parameter=command>ls</parameter></function>"));
+  });
+});
+
+describe("placeholders are never executed or repeated back", () => {
+  const withTools = {
+    allowedTools: ["bash", "write_file"],
+    toolSchemas: {
+      bash: { required: ["command"] },
+      write_file: { required: ["path", "content"] },
+    },
+  };
+
+  it("ignores the template names we used to print", () => {
+    for (const name of ["…", "...", "TOOL_NAME", "tool_name", "YOUR_TOOL", "<tool_name>", "name"]) {
+      const { calls, dropped } = parseToolCallsDetailed(
+        `<tool_call name="${name}">{"command":"dir"}</tool_call>`,
+        withTools
+      );
+      const result = parseToolCallsDetailed(
+        `<tool_call name="${name}">{"command":"dir"}</tool_call>`,
+        withTools
+      );
+      assert.equal(result.calls.length, 0, name);
+      assert.equal(result.dropped.length, 0, `${name} must not be reported as unknown`);
+      assert.equal(result.placeholders, 1, `${name} is counted as a placeholder`);
+    }
+  });
+
+  it("still reports a genuine unknown name", () => {
+    const { dropped } = parseToolCallsDetailed(
+      '<tool_call name="delete_everything">{"command":"dir"}</tool_call>',
+      withTools
+    );
+    assert.equal(dropped.length, 1);
+    assert.match(dropped[0]!.parseError ?? "", /unknown tool "delete_everything"/);
+  });
+
+  it("builds an example from a real declared tool", () => {
+    const example = exampleCall(
+      [
+        { type: "function", function: { name: "write_file", parameters: { type: "object", required: ["path", "content"] } } },
+      ],
+      "…"
+    );
+    assert.equal(example?.name, "write_file");
+    assert.deepEqual(Object.keys(example!.arguments).sort(), ["content", "path"]);
+  });
+
+  it("prefers bash for the example when it is available", () => {
+    const example = exampleCall([
+      { type: "function", function: { name: "glob", parameters: { type: "object", required: ["pattern"] } } },
+      { type: "function", function: { name: "bash", parameters: { type: "object", required: ["command"] } } },
+    ]);
+    assert.equal(example?.name, "bash");
+    assert.deepEqual(example?.arguments, { command: "dir" });
+  });
+
+  it("returns nothing when no tools were declared", () => {
+    assert.equal(exampleCall(undefined), undefined);
+  });
+});
+
+describe("isPlaceholderName", () => {
+  it("accepts real tool names", () => {
+    for (const name of ["bash", "write_file", "read_file", "grep"]) {
+      assert.equal(isPlaceholderName(name), false, name);
+    }
+  });
+
+  it("rejects templates", () => {
+    for (const name of ["…", "...", "TOOL_NAME", "<tool_name>", "your_tool", "name:", "TOOL"]) {
+      assert.equal(isPlaceholderName(name), true, name);
+    }
+  });
+});
+
+describe("unclosed blocks", () => {
+  it("detects a genuine truncation", () => {
+    assert.equal(hasUnclosedToolCall('<tool_call name="bash">{"command":"ls"'), true);
+  });
+
+  it("is not fooled by a closed block that was filtered as a placeholder", () => {
+    assert.equal(hasUnclosedToolCall('<tool_call name="…">{"command":"dir"}</tool_call>'), false);
+  });
+
+  it("is false for prose", () => {
+    assert.equal(hasUnclosedToolCall("all done"), false);
   });
 });

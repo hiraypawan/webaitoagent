@@ -100,6 +100,63 @@ describe("streaming completions", () => {
     assert.deepEqual(frames.at(-1)!.choices, []);
   });
 
+  it("never repeats a placeholder name back to the model", async () => {
+    provider.chunks = ['<tool_call name="…">{"command": "dir"}</tool_call>'];
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: payload({
+        stream: true,
+        tools: [
+          {
+            type: "function",
+            function: { name: "bash", parameters: { type: "object", required: ["command"] } },
+          },
+        ],
+      }),
+    });
+
+    const text = (await sseFrames(response.body))
+      .map((frame) => frame.choices?.[0]?.delta?.content ?? "")
+      .join("");
+    // Nothing runs, and the model is redirected to a real tool — never echoed a
+    // template that it would simply copy again.
+    assert.match(text, /placeholder name/);
+    assert.match(text, /<tool_call name="bash">/);
+    assert.doesNotMatch(text, /name="…"/);
+    assert.doesNotMatch(text, /no tool name/);
+  });
+
+  it("points at a real declared tool when a call is unreadable", async () => {
+    provider.chunks = ['<tool_call name="delete_everything">{"path":"/"}</tool_call>'];
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: payload({
+        stream: true,
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "write_file",
+              parameters: { type: "object", required: ["path", "content"] },
+            },
+          },
+        ],
+      }),
+    });
+
+    const text = (await sseFrames(response.body))
+      .map((frame) => frame.choices?.[0]?.delta?.content ?? "")
+      .join("");
+    assert.match(text, /unknown tool "delete_everything"/);
+    assert.match(text, /Declared tools: write_file/);
+    assert.match(text, /<tool_call name="write_file">/, "the example uses a real tool");
+    assert.doesNotMatch(text, /name="…"|name="TOOL_NAME"/);
+  });
+
   it("turns Qwen/GLM XML into native tool_calls too", async () => {
     provider.chunks = [
       '<tool_call>\n<function=bash>\n<parameter=command>dir</parameter>\n</function>\n</tool_call>',

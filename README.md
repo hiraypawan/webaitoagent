@@ -294,6 +294,7 @@ clients actually rely on:
 | Model names | `mimo-v2.6-pro`, `mimo/mimo-v2.6-pro`, `web-agents-to/mimo-v2.6-pro` and any capitalisation all resolve |
 | Tool calls | native `tool_calls` deltas, `finish_reason: "tool_calls"`, `tool_choice` incl. a forced tool |
 | Tool-call markup | `<tool_call name="x">{...}</tool_call>`, Qwen/GLM `<function=x><parameter=k>v</parameter></function>`, unquoted attributes, `[TOOL_CALLS]`, OpenAI `tool_calls` arrays |
+| Placeholder names | `name="…"`, `name="TOOL_NAME"` are ignored, and the model is told to use a real declared tool (never echoed a template) |
 | `stop` | honoured, including sequences split across stream chunks |
 | `max_tokens` / `max_completion_tokens` | honoured; `finish_reason: "length"` when it cuts |
 | `response_format: {type:"json_object"}` | adds a "reply with bare JSON" instruction to the prompt |
@@ -312,6 +313,10 @@ MiMo's answer box contains more than the answer. The bridge removes the rest:
   "noise" it had said itself.
 - **Busy banners** — `服务器繁忙，请稍后再试`, `Too Many Requests`, and the same
   text in the page title are treated as retryable, never as an answer.
+- **"Still generating"** — a stop button / `aria-busy` keeps the reader waiting, so
+  a pause between paragraphs is not mistaken for the end of the answer
+  (`GENERATING_SELECTORS` to override). Idle detection is 20 polls (5 s) by
+  default (`STREAM_IDLE_POLLS`).
 
 ## Configuration
 

@@ -53,3 +53,25 @@ describe("selector configuration", () => {
     assert.equal(parseSelectors("  "), undefined);
   });
 });
+
+describe("a marker merged onto the answer line", () => {
+  it("removes only the marker", () => {
+    assert.equal(
+      cleanAnswer("Thinking...The user wants a page. Let me write it."),
+      "The user wants a page. Let me write it."
+    );
+  });
+
+  it("handles the Chinese marker", () => {
+    assert.equal(cleanAnswer("思考中用户想要一个页面"), "用户想要一个页面");
+  });
+
+  it("leaves text alone when the marker is the whole message", () => {
+    assert.equal(cleanAnswer("Thinking..."), "Thinking...");
+  });
+
+  it("does not touch a sentence that starts with the word", () => {
+    const text = "Thinking caps on: here is the plan.";
+    assert.equal(cleanAnswer(text), text);
+  });
+});

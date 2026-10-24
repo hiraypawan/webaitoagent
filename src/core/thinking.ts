@@ -15,11 +15,24 @@
 export const DEFAULT_REASONING_SELECTORS = [
   "[class*='think' i]",
   "[class*='reason' i]",
+  "[class*='cot' i]",
+  "[class*='chain-of-thought' i]",
   "[data-thinking]",
   "[data-reasoning]",
+  "[data-testid*='think' i]",
+  "[data-testid*='reason' i]",
   "[aria-label*='thinking' i]",
   "[aria-label*='reasoning' i]",
   "details",
+];
+
+/** Selectors that indicate the page is still generating. */
+export const DEFAULT_GENERATING_SELECTORS = [
+  "[aria-busy='true']",
+  "[data-generating='true']",
+  "[data-streaming='true']",
+  "button[aria-label*='stop' i]",
+  "[class*='stop-generat' i]",
 ];
 
 const HEADER = /^(?:>\s*)?(?:thinking(?:\.\.\.|…| process|\.)?|reasoning|思考中|思考过程|深度思考|已深度思考)\s*[:：]?\s*$/i;
@@ -80,7 +93,30 @@ export function parseSelectors(value: string | undefined): string[] | undefined 
   return parts.length > 0 ? parts : undefined;
 }
 
-/** Remove reasoning from plain text using only the header rule (no DOM). */
+/**
+ * Drop a leading `Thinking...` marker that got merged onto the same line as the
+ * answer ("Thinking...The user wants a page"). Only the marker is removed — the
+ * reasoning body cannot be separated safely from text, which is why the DOM pass
+ * exists.
+ */
+export function stripInlineMarker(text: string): string {
+  const match = /^\s*(?:>\s*)?(?:thinking|reasoning|思考中|思考过程)(\s*(?:\.\.\.|…|[:：]|[-–—]))?/i.exec(text);
+  if (!match) return text;
+
+  const marker = match[0];
+  const punctuation = match[1];
+  const rest = text.slice(marker.length);
+  const cjkMarker = /[\u4e00-\u9fff]/.test(marker);
+
+  // "Thinking caps on" is a sentence, not a marker: without punctuation the
+  // marker must be followed by the end of the line or a non-letter. Chinese
+  // markers ("思考中") are self-delimiting and are often glued to the text.
+  if (!punctuation && !cjkMarker && /^\s*[\p{L}\p{N}]/u.test(rest)) return text;
+  return /[\p{L}\p{N}]/u.test(rest) ? rest : text;
+}
+
+/** Remove reasoning from plain text using only the header rules (no DOM). */
 export function cleanAnswer(text: string): string {
-  return stripThinkingPreamble(text).trimEnd();
+  // Block form first (it knows where the answer starts), then the merged form.
+  return stripInlineMarker(stripThinkingPreamble(text)).trimEnd();
 }

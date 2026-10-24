@@ -1,3 +1,4 @@
+import { exampleCall } from "./toolcalls.js";
 import type { ChatMessage, MessageContent, OpenAITool } from "./types.js";
 import { hashString, truncateMiddle } from "./utils.js";
 
@@ -75,6 +76,7 @@ export function formatToolsForPrompt(tools?: OpenAITool[], toolChoice?: unknown)
   if (!specs) return "";
 
   const choice = toolChoiceText(toolChoice, names[0]);
+  const example = exampleCall(tools);
 
   return [
     "",
@@ -87,10 +89,10 @@ export function formatToolsForPrompt(tools?: OpenAITool[], toolChoice?: unknown)
     specs,
     "",
     "TO CALL A TOOL, reply with exactly one block and nothing else:",
-    '<tool_call name="TOOL_NAME">{"parameter": "value"}</tool_call>',
+    example ? `<tool_call name="${example.name}">${JSON.stringify(example.arguments)}</tool_call>` : "",
     "",
-    "Example:",
-    '<tool_call name="bash">{"command": "ls -la"}</tool_call>',
+    "Use the real names and parameters from the list above; never write placeholders",
+    'like "TOOL_NAME" or "…", they are rejected.',
     "",
     "Tool-call rules:",
     `- Use only these names: ${names.join(", ")}. Never invent a tool name.`,
@@ -115,12 +117,19 @@ export function formatToolReminder(tools?: OpenAITool[], toolChoice?: unknown): 
   const names = tools.map((tool) => tool?.function?.name).filter(Boolean);
   if (names.length === 0) return "";
   const choice = toolChoiceText(toolChoice, names[0]);
+  const example = exampleCall(tools);
   return [
-    "",
-    `Tools (unchanged): ${names.join(", ")}. Call one with ` +
-      '<tool_call name="NAME">{"param":"value"}</tool_call> and stop; otherwise answer in plain text.',
+    `Tools (unchanged): ${names.join(", ")}.`,
+    example
+      ? `To call one, reply with exactly this shape and nothing else: ` +
+        `<tool_call name="${example.name}">${JSON.stringify(example.arguments)}</tool_call>`
+      : "",
+    "Otherwise answer in plain text with no tool block.",
     ...(choice ? [choice] : []),
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .padStart(1, "\n");
 }
 
 function toolChoiceText(toolChoice: unknown, firstTool?: string): string {
