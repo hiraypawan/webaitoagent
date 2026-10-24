@@ -66,6 +66,8 @@ export const config = {
   ),
   /** Optional JSON patch for provider selectors/URLs (survives UI redesigns). */
   siteOverridesPath: optionalStr("SITE_OVERRIDES"),
+  /** Use an already-installed Chromium instead of Playwright's download. */
+  chromiumExecutable: optionalStr("CHROMIUM_EXECUTABLE"),
   mimoUser: optionalStr("MIMO_USER"),
   mimoPass: optionalStr("MIMO_PASS"),
 

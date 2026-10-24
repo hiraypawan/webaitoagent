@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config, isLoopbackHost } from "../config/index.js";
@@ -168,11 +169,25 @@ export async function ensureServer(options: { quiet?: boolean } = {}): Promise<b
   }
 
   if (!options.quiet) console.log("Starting web-agents-to server...");
-  const child = spawn(
-    process.execPath,
-    ["--import", "tsx", path.join(root, "src", "server", "main.ts")],
-    { cwd: root, stdio: "ignore", detached: true, env: { ...process.env } }
-  );
+
+  // Prefer the TypeScript entrypoint in a dev checkout, fall back to the
+  // compiled build when the CLI is installed without dev dependencies.
+  const tsxEntry = path.join(root, "src", "server", "main.ts");
+  const distEntry = path.join(root, "dist", "server", "main.js");
+  const hasTsx = fs.existsSync(path.join(root, "node_modules", "tsx"));
+  const args = hasTsx && fs.existsSync(tsxEntry) ? ["--import", "tsx", tsxEntry] : [distEntry];
+
+  if (!hasTsx && !fs.existsSync(distEntry)) {
+    console.error("No server entrypoint found. Run `npm run build` (or `npm install` in a dev checkout).");
+    return false;
+  }
+
+  const child = spawn(process.execPath, args, {
+    cwd: root,
+    stdio: "ignore",
+    detached: true,
+    env: { ...process.env },
+  });
   child.on("error", () => {});
   child.unref();
 

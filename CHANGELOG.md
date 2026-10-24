@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.2.1
+
+Audit pass, verified with a real browser.
+
+### Fixed
+- **Double-send risk**: after pressing Enter, a visible send button was clicked
+  unconditionally, which posts a second (empty) message on sites where Enter
+  already submits. The fallback now only fires when the input still has text.
+- **`networkidle` navigation** was used for every page load. Provider SPAs keep
+  sockets open, so it never settled and each attempt burned the 45 s timeout.
+  Navigation now waits for DOM + the chat input, with cookie handling.
+- **Continuation prompts re-sent the full tool spec** on every agent step,
+  consuming a large slice of context. Follow-ups now send a one-line reminder;
+  schemas are sent once per conversation.
+- **Placeholder names** copied from the instructions (`name="NAME"`, `TOOL`, …)
+  were parsed as failed tool calls; they are now ignored silently.
+- **CLI auto-start** assumed `tsx`; it now falls back to `dist/server/main.js`.
+
+### Added
+- `CHROMIUM_EXECUTABLE` / `BrowserManagerOptions.executablePath` for containers
+  and CI images that ship their own Chromium.
+- Real-browser test suite (`test/browser-e2e.test.ts`) against
+  `test/fixtures/mock-chat.html`, covering incremental streaming, tool-block
+  preservation, continuation vs. new conversation, single-bubble UIs, long
+  answers, busy notices and serialisation. Skips when no browser is available.
+- `docs/AUDIT.md`: findings, verification evidence and unverified areas.
+
 ## 1.2.0
 
 opencode compatibility and a much stricter tool-call layer.

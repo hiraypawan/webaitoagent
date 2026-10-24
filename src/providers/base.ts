@@ -346,23 +346,18 @@ export class BrowserChatProvider implements Provider {
 
     for (const url of this.cfg.chatUrls) {
       signal?.throwIfAborted();
-      await page.goto(url, { waitUntil: "networkidle", timeout: 45_000 }).catch(() => {});
-      await page.waitForTimeout(1_500);
-      await this.dismissCookieBanner(page);
+      await this.goto(page, url);
       if (await this.findInput(page)) return page;
     }
 
     signal?.throwIfAborted();
-    await page.goto(this.cfg.baseUrl, { waitUntil: "networkidle", timeout: 45_000 }).catch(() => {});
-    await page.waitForTimeout(1_500);
-    await this.dismissCookieBanner(page);
+    await this.goto(page, this.cfg.baseUrl);
     if (await this.findInput(page)) return page;
 
     if (this.cfg.credentials?.user && this.cfg.credentials?.pass && this.cfg.loginUrl) {
       await this.autoLogin(page);
       for (const url of this.cfg.chatUrls) {
-        await page.goto(url, { waitUntil: "networkidle", timeout: 45_000 }).catch(() => {});
-        await page.waitForTimeout(1_500);
+        await this.goto(page, url);
         if (await this.findInput(page)) return page;
       }
     }
@@ -374,6 +369,26 @@ export class BrowserChatProvider implements Provider {
       );
     }
     return page;
+  }
+
+  /**
+   * Navigate without waiting for networkidle: provider SPAs keep websockets and
+   * pollers open, so networkidle never fires and every load burns the timeout.
+   * Instead we wait for the DOM and then for one of the input selectors.
+   */
+  private async goto(page: Page, url: string): Promise<void> {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => {});
+    await this.waitForInput(page);
+    await this.dismissCookieBanner(page);
+  }
+
+  private async waitForInput(page: Page, timeoutMs = 20_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      if (await this.findInput(page)) return true;
+      await page.waitForTimeout(400);
+    } while (Date.now() < deadline);
+    return false;
   }
 
   private async getPage(): Promise<Page> {
@@ -389,8 +404,8 @@ export class BrowserChatProvider implements Provider {
 
     log.info(`[${this.id}] attempting password login for ${user}`);
     try {
-      await page.goto(this.cfg.loginUrl, { waitUntil: "networkidle", timeout: 45_000 });
-      await page.waitForTimeout(1_500);
+      await page.goto(this.cfg.loginUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+      await page.waitForTimeout(2_000);
       const userInput = page.locator(this.cfg.usernameSelector ?? "input[name='account']").first();
       const passInput = page.locator(this.cfg.passwordSelector ?? "input[name='password']").first();
       await userInput.fill(user, { timeout: 15_000 });
@@ -501,11 +516,23 @@ export class BrowserChatProvider implements Provider {
       await button.click({ timeout: 15_000 });
       return;
     }
+
     await input.press("Enter");
-    // Some UIs need a second Enter after the first enables the send button.
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(500);
+
+    // Only click a send button if Enter did NOT send: the input still holds
+    // the text. Clicking unconditionally would post a second, empty message.
+    const stillFilled = (await input.inputValue().catch(() => "")).trim().length > 0;
+    if (!stillFilled) return;
+
     const fallback = await this.findSubmit(page);
-    if (fallback) await fallback.click({ timeout: 5_000 }).catch(() => {});
+    if (fallback) {
+      await fallback.click({ timeout: 5_000 }).catch(() => {});
+      return;
+    }
+    if (await this.findInput(page)) {
+      await input.press("Enter").catch(() => {});
+    }
   }
 
   private async countResponses(page: Page): Promise<number> {

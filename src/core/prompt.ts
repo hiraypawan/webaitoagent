@@ -93,6 +93,25 @@ export function formatToolsForPrompt(tools?: OpenAITool[], toolChoice?: unknown)
     .join("\n");
 }
 
+/**
+ * Continuations only need a reminder: the full spec is already in the
+ * conversation the site is holding. Re-sending schemas every agent step wastes
+ * a large slice of the context window and re-reads the instructions to the
+ * model on every turn.
+ */
+export function formatToolReminder(tools?: OpenAITool[], toolChoice?: unknown): string {
+  if (!tools?.length) return "";
+  const names = tools.map((tool) => tool?.function?.name).filter(Boolean);
+  if (names.length === 0) return "";
+  const choice = toolChoiceText(toolChoice, names[0]);
+  return [
+    "",
+    `Tools (unchanged): ${names.join(", ")}. Call one with ` +
+      '<tool_call name="NAME">{"param":"value"}</tool_call> and stop; otherwise answer in plain text.',
+    ...(choice ? [choice] : []),
+  ].join("\n");
+}
+
 function toolChoiceText(toolChoice: unknown, firstTool?: string): string {
   if (toolChoice === "required" || (typeof toolChoice === "object" && toolChoice !== null && "function" in toolChoice)) {
     const named =
@@ -131,7 +150,7 @@ export function buildContinuationPrompt(
   opts: BuildPromptOptions = {}
 ): string {
   const maxChars = opts.maxChars ?? 120_000;
-  const tools = formatToolsForPrompt(opts.tools, opts.toolChoice);
+  const tools = formatToolReminder(opts.tools, opts.toolChoice);
 
   const trailing: ChatMessage[] = [];
   for (let i = messages.length - 1; i >= 0; i--) {
