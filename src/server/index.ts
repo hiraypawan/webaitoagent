@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { config } from "../config/index.js";
+import { contextStats, contextTokensFor } from "../core/context-stats.js";
 import { PlaywrightBrowserManager } from "../browser/manager.js";
 import { createProviders } from "../providers/registry.js";
 import { RequestAbortedError, ValidationError, toErrorBody } from "../core/errors.js";
@@ -134,6 +135,7 @@ export async function createServer(options: ServerOptions = {}): Promise<BuiltSe
   app.get("/status", async () => ({
     ok: true,
     version: VERSION,
+    context: contextStats(config.maxPromptChars),
     headless: options.headless ?? config.headless,
     providers: await Promise.all(
       providers.map(async (provider) => ({
@@ -154,6 +156,8 @@ export async function createServer(options: ServerOptions = {}): Promise<BuiltSe
           created,
           owned_by: model.owned_by,
           provider: provider.id,
+          // Some clients size their own context window from this.
+          context_length: contextTokensFor(config.maxPromptChars),
         }))
       ),
     };

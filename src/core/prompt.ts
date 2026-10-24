@@ -9,6 +9,15 @@ export interface BuildPromptOptions {
   maxChars?: number;
   /** Extra instructions appended on top of the system prompt. */
   systemAppend?: string;
+  /** Called when the mobile-friendly character budget forced an elision. */
+  onTrim?: (info: { dropped: number; max: number }) => void;
+}
+
+/** Apply the character budget and report (never hide) what was dropped. */
+function applyLimit(text: string, maxChars: number, onTrim?: BuildPromptOptions["onTrim"]): string {
+  if (text.length <= maxChars) return text;
+  onTrim?.({ dropped: text.length - maxChars, max: maxChars });
+  return truncateMiddle(text, maxChars);
 }
 
 /** Flatten any OpenAI content shape into plain text. */
@@ -136,7 +145,7 @@ export function buildPrompt(messages: ChatMessage[], opts: BuildPromptOptions = 
   const tools = formatToolsForPrompt(opts.tools, opts.toolChoice);
   const body = lines.join("\n");
   const prompt = `${body}${tools}\nAssistant:`;
-  return truncateMiddle(prompt, maxChars);
+  return applyLimit(prompt, maxChars, opts.onTrim);
 }
 
 /**
@@ -168,7 +177,7 @@ export function buildContinuationPrompt(
     prompt = trailing.map(roleLine).join("\n");
   }
 
-  return truncateMiddle(`${prompt}${tools}`, maxChars);
+  return applyLimit(`${prompt}${tools}`, maxChars, opts.onTrim);
 }
 
 /**

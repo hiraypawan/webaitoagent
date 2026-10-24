@@ -99,8 +99,15 @@ Copy one of those into opencode, e.g. `mimo-v2.6-pro`.
 Two usual causes.
 
 1. **The session died.** `WEB doctor --probe`, then `WEB login` if needed.
-2. **The conversation got too long** for MiMo's web chat box. Start a fresh chat
-   in opencode (`/new`), or ask for smaller steps. Long agent runs hit this.
+2. **The conversation got too long** for MiMo's web chat box. Check with:
+
+   ```bash
+   WEB status
+   ```
+
+   If `context.trimmed` is going up, history is being dropped. Start a fresh chat
+   (`/new`), work in smaller steps, or raise `MAX_PROMPT_CHARS` in `.env` and run
+   `WEB setup --force` again so opencode is told the bigger window too.
 
 ---
 

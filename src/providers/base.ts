@@ -22,6 +22,7 @@ import {
   buildPrompt,
   conversationKey,
 } from "../core/prompt.js";
+import { recordRequest, recordTrim } from "../core/context-stats.js";
 import { DeltaTracker, stripBaseline } from "../core/stream.js";
 import { newId, nowSeconds, sleep } from "../core/utils.js";
 import {
@@ -339,10 +340,18 @@ export class BrowserChatProvider implements Provider {
     const isNewConversation = key !== this.lastConversationKey || req.messages.length < this.lastMessageCount;
     if (isNewConversation) await this.startNewChat(page);
 
+    recordRequest();
     const promptOptions = {
       tools: req.tools,
       toolChoice: req.tool_choice,
       maxChars: this.opts.maxPromptChars,
+      onTrim: (info: { dropped: number; max: number }) => {
+        recordTrim(info.dropped);
+        log.warn(
+          `[${this.id}] history trimmed: dropped ${info.dropped} characters ` +
+            `to fit the ${info.max}-character browser budget`
+        );
+      },
     };
     const prompt = isNewConversation
       ? buildPrompt(req.messages, promptOptions)
