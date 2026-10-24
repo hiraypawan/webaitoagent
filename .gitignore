@@ -5,3 +5,8 @@ explore/
 *.log
 .env
 .env.local
+mimo/
+mock/
+explore/
+explore-*.ts
+debug-*.ts
