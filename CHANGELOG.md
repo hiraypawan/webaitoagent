@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.4.0
+
+More tools, and a `bash` tool that no longer dies on Windows.
+
+### Fixed
+- `bash` hard-coded `cmd.exe` on Windows, so every Unix-style command failed with
+  *"is not recognized as an internal or external command"*. The shell is now
+  detected: Git Bash → PowerShell 7 → Windows PowerShell → cmd.exe (and `$SHELL`
+  on Linux/macOS). `AGENT_SHELL` forces one; each call may pass `shell` and `cwd`.
+- If the chosen shell cannot start, the command is retried with the next shell.
+- If the shell does not know the command, a built-in interpreter runs the simple
+  cases (`ls`, `cat`, `echo`, `pwd`, `mkdir -p`, `rm -r`, `cp`, `mv`, `touch`,
+  `head`, `tail`, `wc`, including `&&`/`;` chains) and says that it did.
+- Failures now name the shell used and point at the dedicated tools.
+
+### Added
+- Tools: `glob`, `grep`, `move_file`, `copy_file`, `delete_file`, `make_dir`,
+  `append_file` — all implemented in Node, so they behave identically on Windows,
+  macOS and Linux and never depend on a shell.
+- `WEB doctor` reports the detected shell and how to improve it.
+- 42 new tests: shell detection (Git Bash/PowerShell/cmd/`$SHELL`, forced and
+  missing shells), the fallback interpreter, and every new tool.
+
 ## 1.3.2
 
 Made the two context limits agree, and stopped history from disappearing silently.

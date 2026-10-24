@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import { apiKey, baseUrl, chat, ensureServer, listModels } from "./client.js";
+import { detectShell } from "./shell.js";
 
 interface Check {
   name: string;
@@ -52,6 +53,20 @@ async function main(): Promise<void> {
     ok: major > 20 || (major === 20 && minor >= 3),
     detail: process.version,
     fix: "Upgrade to Node.js 20.3 or newer.",
+  });
+
+  const shell = detectShell();
+  record({
+    name: "Shell for the coding agent",
+    ok: shell.kind === "bash",
+    detail:
+      shell.kind === "bash"
+        ? `${shell.label} (${shell.file})`
+        : `${shell.label} — Unix commands like ls, cat, grep are worked around automatically`,
+    fix:
+      shell.kind === "bash"
+        ? undefined
+        : "Install Git for Windows (git-scm.com) for full bash, or ignore this: the agent uses built-in equivalents.",
   });
 
   const up = await ensureServer({ quiet: true });

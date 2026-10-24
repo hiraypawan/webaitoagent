@@ -1,6 +1,6 @@
 {
   "name": "web-agents-to",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "description": "Turn a free web AI chat UI into a local OpenAI-compatible API, CLI and browser extension.",
   "type": "module",
   "main": "dist/server/main.js",
