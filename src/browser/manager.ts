@@ -14,7 +14,10 @@ export class PlaywrightBrowserManager {
 
   constructor(opts: BrowserManagerOptions = {}) {
     this.opts = {
-      userDataRoot: opts.userDataRoot ?? path.join(os.homedir(), ".web-agents-to", "profiles"),
+      userDataRoot:
+        opts.userDataRoot && opts.userDataRoot.trim()
+          ? opts.userDataRoot
+          : path.join(os.homedir(), ".web-agents-to", "profiles"),
       headless: opts.headless ?? true,
     };
   }
