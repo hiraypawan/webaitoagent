@@ -100,6 +100,48 @@ describe("streaming completions", () => {
     assert.deepEqual(frames.at(-1)!.choices, []);
   });
 
+  it("turns Qwen/GLM XML into native tool_calls too", async () => {
+    provider.chunks = [
+      '<tool_call>\n<function=bash>\n<parameter=command>dir</parameter>\n</function>\n</tool_call>',
+    ];
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: payload({
+        stream: true,
+        tools: [{ type: "function", function: { name: "bash", parameters: { type: "object" } } }],
+      }),
+    });
+
+    const parsed = await sseFrames(response.body);
+    const call = parsed.find((frame) => frame.choices?.[0]?.delta?.tool_calls)?.choices[0].delta
+      .tool_calls[0];
+    assert.ok(call, "expected a tool_calls frame");
+    assert.equal(call.function.name, "bash");
+    assert.deepEqual(JSON.parse(call.function.arguments), { command: "dir" });
+  });
+
+  it("explains an unreadable tool block instead of answering with the failure", async () => {
+    provider.chunks = ["<tool_call>\nI will list the files now.\n</tool_call>"];
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: payload({
+        stream: true,
+        tools: [{ type: "function", function: { name: "bash", parameters: { type: "object" } } }],
+      }),
+    });
+
+    const text = (await sseFrames(response.body))
+      .map((frame) => frame.choices?.[0]?.delta?.content ?? "")
+      .join("");
+    assert.match(text, /could not be read/);
+    assert.match(text, /I will list the files now/, "the model is shown what it wrote");
+    assert.match(text, /<tool_call name="bash">/, "and the exact accepted shape");
+  });
+
   it("converts text tool calls into native tool_calls when tools are supplied", async () => {
     provider.chunks = ['<tool_call name="bash">{"command":"ls"}</tool_call>'];
     const response = await app.inject({

@@ -23,6 +23,8 @@ import {
   conversationKey,
 } from "../core/prompt.js";
 import { contextBudget } from "../core/budget.js";
+import { looksBusy } from "../core/page-signals.js";
+import { cleanAnswer, DEFAULT_REASONING_SELECTORS, parseSelectors } from "../core/thinking.js";
 import { recordRequest, recordTrim } from "../core/context-stats.js";
 import { DeltaTracker, stripBaseline } from "../core/stream.js";
 import { newId, nowSeconds, sleep } from "../core/utils.js";
@@ -54,6 +56,8 @@ export interface SiteConfig {
   otpSelectors?: string;
   /** Substrings that mean "the site is rate limiting us" (safe to retry). */
   busyPatterns?: string[];
+  /** Containers holding the model's reasoning, removed before reading text. */
+  reasoningSelectors?: string[];
   credentials?: { user?: string; pass?: string };
 }
 
@@ -419,6 +423,16 @@ export class BrowserChatProvider implements Provider {
         throw new ServerBusyError(`${this.id} reported: ${candidate.slice(0, 120)}`);
       }
 
+      // Nothing in the answer box yet: the page title often carries the banner
+      // ("server busy, try again later"), which is far better than waiting out
+      // the full timeout.
+      if (!tracker.hasEmitted && !candidate.trim()) {
+        const title = await page.title().catch(() => "");
+        if (this.isBusy(title)) {
+          throw new ServerBusyError(`${this.id} page reports: ${title.trim().slice(0, 120)}`);
+        }
+      }
+
       if (candidate === lastCandidate) {
         stablePolls++;
       } else {
@@ -760,14 +774,49 @@ export class BrowserChatProvider implements Provider {
     return total;
   }
 
+  private reasoningSelectors(): string[] {
+    return (
+      parseSelectors(config.reasoningSelectors) ??
+      this.cfg.reasoningSelectors ??
+      DEFAULT_REASONING_SELECTORS
+    );
+  }
+
+  /**
+   * Read the newest answer, with the model's reasoning removed.
+   *
+   * The DOM pass is the reliable one: MiMo (like most Chinese web UIs) renders
+   * the chain of thought in its own element inside the same prose container.
+   */
   private async readResponseText(page: Page): Promise<string> {
+    const selectors = this.reasoningSelectors();
+
     for (const selector of this.cfg.responseSelectors) {
       try {
         const locator = page.locator(selector);
         const count = await locator.count();
         for (let i = count - 1; i >= 0; i--) {
-          const text = (await locator.nth(i).innerText().catch(() => "")).trimEnd();
-          if (text.trim()) return text;
+          const withoutReasoning = await locator
+            .nth(i)
+            .evaluate((node: Element, drop: string[]) => {
+              const clone = node.cloneNode(true) as HTMLElement;
+              for (const dropSelector of drop) {
+                try {
+                  for (const found of Array.from(clone.querySelectorAll(dropSelector))) {
+                    found.remove();
+                  }
+                } catch {
+                  // an unsupported selector must not break reading
+                }
+              }
+              const html = clone as HTMLElement;
+              return (html.innerText ?? html.textContent ?? "").trimEnd();
+            }, selectors)
+            .catch(() => undefined);
+
+          const text = (withoutReasoning ?? (await locator.nth(i).innerText().catch(() => ""))).trimEnd();
+          const cleaned = cleanAnswer(text);
+          if (cleaned.trim()) return cleaned;
         }
       } catch {
         // selector not present on this page state
@@ -777,11 +826,7 @@ export class BrowserChatProvider implements Provider {
   }
 
   private isBusy(text: string): boolean {
-    // Busy notices are short banners; a long answer that happens to mention
-    // "try again later" must not be retried.
-    if (!text || text.length > 300) return false;
-    const lower = text.toLowerCase();
-    return this.busyPatterns.some((pattern) => lower.includes(pattern.toLowerCase()));
+    return looksBusy(text, this.busyPatterns);
   }
 
   private isRetryable(error: unknown): boolean {

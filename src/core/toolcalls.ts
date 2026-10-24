@@ -26,10 +26,16 @@ export interface ToolCallParseResult {
   dropped: ParsedToolCall[];
 }
 
-/** `<tool_call name="x">{...}</tool_call>` */
-const NAMED_BLOCK = /<tool_call\s+name\s*=\s*["']([^"']+)["']\s*>\s*([\s\S]*?)<\/tool_call>/gi;
-/** `<tool_call>{"name":"x","arguments":{...}}</tool_call>` */
-const GENERIC_BLOCK = /<tool_call\s*>\s*([\s\S]*?)<\/tool_call>/gi;
+/** Any `<tool_call ...>...</tool_call>` block, attributes or not. */
+const TOOL_BLOCK = /<tool_call\b([^>]*)>([\s\S]*?)<\/tool_call>/gi;
+/** `<function=NAME>...<parameter=KEY>VALUE</parameter></function>` (Qwen/GLM style). */
+const XML_FUNCTION = /<function\s*=\s*["']?([\w.-]+)["']?\s*>([\s\S]*?)<\/function>/gi;
+/** A bare `<function=NAME>` block, without a `<tool_call>` wrapper. */
+const XML_FUNCTION_ANYWHERE = /<function\s*=\s*["']?([\w.-]+)["']?\s*>([\s\S]*?)<\/function>/gi;
+/** Misral/Devstral style: `[TOOL_CALLS] [{...}]`. */
+const TOOL_CALLS_TAG = /\[TOOL_CALLS\]\s*([\[{][\s\S]*?[\]}])(?=\s*$|\s*\n)/;
+/** `name` inside an attribute string. */
+const ATTR_NAME = /name\s*=\s*["']?([^"'>\s]+)/i;
 /** Fenced JSON blocks, optionally annotated as a tool call. */
 const FENCED_BLOCK = /```(?:json|tool_call|tool)?\s*\n?([\s\S]*?)```/gi;
 /** `bash({"command":"ls"})` */
@@ -111,32 +117,24 @@ export function parseToolCallsDetailed(
 ): ToolCallParseResult {
   if (!text) return { calls: [], dropped: [] };
 
-  const raws: { name: string; body: string; raw: string }[] = [];
-
-  for (const match of text.matchAll(NAMED_BLOCK)) {
-    raws.push({ name: match[1]!, body: (match[2] ?? "").trim(), raw: match[0] });
-  }
-
-  for (const match of text.matchAll(GENERIC_BLOCK)) {
-    const body = (match[1] ?? "").trim();
-    const parsed = jsonToolCall(body);
-    if (parsed) raws.push({ name: parsed.name, body: JSON.stringify(parsed.args), raw: match[0] });
-    else raws.push({ name: "", body, raw: match[0] });
-  }
-
-  if (raws.length === 0) {
-    for (const call of implicitCalls(text, options)) raws.push(call);
-  }
+  const raws = collectRawCalls(text, options);
 
   const calls: ParsedToolCall[] = [];
   const dropped: ParsedToolCall[] = [];
   const seen = new Set<string>();
 
   for (const raw of raws) {
-    const parsedBody = jsonToolCall(raw.body);
+    const parsedBody = raw.args ? { name: raw.name, args: raw.args } : jsonToolCall(raw.body);
     const name = raw.name || parsedBody?.name || "";
     if (!name) {
-      dropped.push({ name: "(unknown)", args: {}, raw: raw.raw, parseError: "no tool name" });
+      // Keep the block itself in the report: the next fix comes from seeing what
+      // the model actually wrote.
+      dropped.push({
+        name: "(unknown)",
+        args: {},
+        raw: raw.raw,
+        parseError: `unrecognised tool-call format: ${snippet(raw.raw)}`,
+      });
       continue;
     }
 
@@ -149,13 +147,18 @@ export function parseToolCallsDetailed(
       continue;
     }
 
-    let args = parsedBody?.args;
+    let args = raw.args ?? parsedBody?.args;
     if (!args) {
       const parsed = tryParseObject(raw.body);
       if (parsed) args = parsed;
     }
     if (!args) {
-      dropped.push({ name: resolved, args: {}, raw: raw.raw, parseError: "arguments were not valid JSON" });
+      dropped.push({
+        name: resolved,
+        args: {},
+        raw: raw.raw,
+        parseError: `arguments were not valid JSON: ${snippet(raw.body)}`,
+      });
       continue;
     }
 
@@ -187,6 +190,118 @@ export function parseToolCallsDetailed(
   }
 
   return { calls, dropped };
+}
+
+interface RawCall {
+  name: string;
+  body: string;
+  raw: string;
+  /** Set when the format carried structured arguments already. */
+  args?: Record<string, unknown>;
+}
+
+/** A short, single-line excerpt for error messages and logs. */
+export function snippet(value: string, limit = 160): string {
+  const flat = value.replace(/\s+/g, " ").trim();
+  return flat.length > limit ? `${flat.slice(0, limit)}…` : flat;
+}
+
+/** `<parameter=key>value</parameter>` blocks to an object. */
+function xmlParameters(body: string): Record<string, unknown> | undefined {
+  const params: Record<string, unknown> = {};
+  let found = false;
+  const pattern = /<parameter\s*=\s*["']?([\w.-]+)["']?\s*>([\s\S]*?)<\/parameter>/gi;
+  for (const match of body.matchAll(pattern)) {
+    found = true;
+    const key = match[1]!.trim();
+    const raw = (match[2] ?? "").trim();
+    // Values may themselves be JSON (arrays, objects); keep them structured.
+    const parsed = tryJson(raw);
+    params[key] = parsed === undefined ? raw : parsed;
+  }
+  return found ? params : undefined;
+}
+
+/**
+ * Every tool-call shape we know about, in one pass.
+ *
+ * Models on the web are not consistent: MiMo, Qwen and GLM all emit slightly
+ * different markup, and a single unknown shape used to poison a whole turn with
+ * "no tool name". Anything unrecognised is reported with its own text.
+ */
+function collectRawCalls(text: string, options: ParseToolCallsOptions): RawCall[] {
+  const raws: RawCall[] = [];
+  const consumed: Array<[number, number]> = [];
+
+  for (const match of text.matchAll(TOOL_BLOCK)) {
+    const attrs = match[1] ?? "";
+    const body = (match[2] ?? "").trim();
+    const raw = match[0];
+    consumed.push([match.index ?? 0, (match.index ?? 0) + raw.length]);
+
+    // Qwen/GLM: <tool_call><function=bash><parameter=command>ls</parameter></function></tool_call>
+    const xml = XML_FUNCTION.exec(raw);
+    XML_FUNCTION.lastIndex = 0;
+    if (xml) {
+      raws.push({
+        name: xml[1]!.trim(),
+        body: xml[2] ?? "",
+        raw,
+        args: xmlParameters(xml[2] ?? "") ?? {},
+      });
+      continue;
+    }
+
+    const attrName = ATTR_NAME.exec(attrs)?.[1];
+    const parsed = jsonToolCalls(body);
+    if (parsed.length > 0) {
+      for (const call of parsed) {
+        if (attrName && !call.name) raws.push({ name: attrName, body, raw, args: call.args });
+        else raws.push({ name: call.name || attrName || "", body, raw, args: call.args });
+      }
+      continue;
+    }
+
+    if (attrName) {
+      raws.push({ name: attrName, body, raw });
+      continue;
+    }
+
+    // A name followed by JSON, without keys around the name: bash {"command":"ls"}
+    const bare = /^([\w.-]+)\s*[\n:,]?\s*([\[{][\s\S]*)$/.exec(body);
+    if (bare) {
+      raws.push({ name: bare[1]!, body: bare[2]!, raw });
+      continue;
+    }
+
+    raws.push({ name: "", body, raw });
+  }
+
+  // A `<function=...>` block on its own (some models skip the wrapper).
+  for (const match of text.matchAll(XML_FUNCTION_ANYWHERE)) {
+    const at = match.index ?? 0;
+    if (consumed.some(([from, to]) => at >= from && at < to)) continue;
+    raws.push({
+      name: match[1]!.trim(),
+      body: match[2] ?? "",
+      raw: match[0],
+      args: xmlParameters(match[2] ?? "") ?? {},
+    });
+  }
+
+  // `[TOOL_CALLS] [...]`
+  const tagged = TOOL_CALLS_TAG.exec(text);
+  if (tagged) {
+    for (const call of jsonToolCalls(tagged[1]!)) {
+      raws.push({ name: call.name, body: JSON.stringify(call.args), raw: tagged[0], args: call.args });
+    }
+  }
+
+  if (raws.length === 0) {
+    for (const call of implicitCalls(text, options)) raws.push(call);
+  }
+
+  return raws;
 }
 
 function resolveToolName(name: string, options: ParseToolCallsOptions): string | undefined {
@@ -260,15 +375,17 @@ function implicitCalls(
   const trimmed = text.trim();
   const found: { name: string; body: string; raw: string }[] = [];
 
-  // A fenced block or the whole message that is just one JSON object.
+  // A fenced block or the whole message that is just JSON (one call or many).
   for (const match of trimmed.matchAll(FENCED_BLOCK)) {
-    const parsed = jsonToolCall((match[1] ?? "").trim());
-    if (parsed) found.push({ name: parsed.name, body: JSON.stringify(parsed.args), raw: match[0] });
+    for (const parsed of jsonToolCalls((match[1] ?? "").trim())) {
+      found.push({ name: parsed.name, body: JSON.stringify(parsed.args), raw: match[0] });
+    }
   }
 
   if (found.length === 0 && (trimmed.startsWith("{") || trimmed.startsWith("["))) {
-    const parsed = jsonToolCall(trimmed);
-    if (parsed) found.push({ name: parsed.name, body: JSON.stringify(parsed.args), raw: trimmed });
+    for (const parsed of jsonToolCalls(trimmed)) {
+      found.push({ name: parsed.name, body: JSON.stringify(parsed.args), raw: trimmed });
+    }
   }
 
   // `bash({...})`
@@ -338,6 +455,33 @@ function jsonToolCall(body: string): { name: string; args: Record<string, unknow
     object.arguments ?? object.parameters ?? object.input ?? object.args ?? object.params ?? object.body
   );
   return { name, args };
+}
+
+/** Like jsonToolCall, but returns every call in an array / tool_calls payload. */
+export function jsonToolCalls(body: string): { name: string; args: Record<string, unknown> }[] {
+  const value = tryJson(body);
+  if (value === undefined) return [];
+
+  const list = Array.isArray(value) ? value : [value];
+  const out: { name: string; args: Record<string, unknown> }[] = [];
+
+  for (const entry of list) {
+    if (!entry || typeof entry !== "object") continue;
+    const object = entry as Record<string, unknown>;
+
+    if (Array.isArray(object.tool_calls)) {
+      for (const nested of object.tool_calls) {
+        const parsed = jsonToolCalls(JSON.stringify(nested));
+        out.push(...parsed);
+      }
+      continue;
+    }
+
+    const parsed = jsonToolCall(JSON.stringify(object));
+    if (parsed) out.push(parsed);
+  }
+
+  return out;
 }
 
 function argsOf(value: unknown): Record<string, unknown> {
@@ -424,17 +568,18 @@ function stableStringify(value: unknown): string {
   return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(",")}}`;
 }
 
-/** Remove tool-call blocks so clients only see the prose answer. */
+/** Remove tool-call blocks (any known markup) so clients only see prose. */
 export function stripToolCalls(text: string): string {
   return text
-    .replace(NAMED_BLOCK, "")
-    .replace(GENERIC_BLOCK, "")
+    .replace(TOOL_BLOCK, "")
+    .replace(XML_FUNCTION_ANYWHERE, "")
+    .replace(/\[TOOL_CALLS\][\s\S]*$/u, "")
     .replace(/\n{3,}/gu, "\n\n")
     .trim();
 }
 
 export function hasToolCalls(text: string): boolean {
-  return /<tool_call[\s>]/i.test(text);
+  return /<tool_call[\s>]|<function\s*=|\[TOOL_CALLS\]/i.test(text);
 }
 
 /** Convert parsed text-protocol calls into OpenAI `tool_calls`. */

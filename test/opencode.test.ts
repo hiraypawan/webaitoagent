@@ -270,7 +270,9 @@ describe("opencode tool-call contract", () => {
     assert.equal(frames.at(-1)!.choices![0]!.finish_reason, "stop");
 
     const text = frames.map((f) => f.choices?.[0]?.delta?.content ?? "").join("");
-    assert.match(text, /tool call ignored/);
+    assert.match(text, /tool call could not be read/);
+    assert.match(text, /delete_everything/, "the rejected name is reported");
+    assert.match(text, /arguments were not valid JSON/, "the broken JSON is reported");
     await local.app.close();
   });
 

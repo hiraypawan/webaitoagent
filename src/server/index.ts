@@ -558,13 +558,23 @@ function toToolCallDelta(call: ParsedToolCall, index: number) {
   };
 }
 
-/** Surface a rejected tool call to the model instead of failing the whole step. */
+/**
+ * Surface a rejected tool call to the model instead of failing the whole step.
+ *
+ * The message shows the offending text and the exact shape we accept: a model
+ * that used the wrong markup can only fix it if it is told what it wrote.
+ */
 function toolDropNote(dropped: ParsedToolCall[]): string {
   const details = dropped
-    .slice(0, 3)
+    .slice(0, 2)
     .map((call) => `${call.name}: ${call.parseError ?? "invalid tool call"}`)
     .join("; ");
-  return `\n[tool call ignored — ${details}. Retry with one of: valid JSON arguments and a declared tool name.]`;
+  const example = dropped[0]?.name && dropped[0].name !== "(unknown)" ? dropped[0].name : "bash";
+  return (
+    `\n[tool call could not be read — ${details}.\n` +
+    `Send it again in exactly this form, one block, nothing else:\n` +
+    `<tool_call name="${example}">{"command": "dir"}</tool_call>]`
+  );
 }
 
 async function collectCompletion(

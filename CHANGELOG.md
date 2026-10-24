@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.5.1
+
+Fixes from a real Windows session: broken tool calls, reasoning in the answer,
+and a stack trace when the server was started twice.
+
+### Fixed
+- **Tool calls failed with `(unknown): no tool name`.** The parser only knew
+  `<tool_call name="x">{json}</tool_call>`. It now accepts:
+  Qwen/GLM `<function=name><parameter=key>value</parameter></function>`, bare
+  `<function=…>` blocks, unquoted attribute names, `name` followed by JSON,
+  JSON arrays of calls, OpenAI `tool_calls` payloads, and `[TOOL_CALLS]`.
+- When a block is genuinely unreadable the message now quotes what the model
+  wrote and shows the exact accepted shape, instead of "(unknown): no tool name".
+- **The model's `Thinking…` text was captured as the answer** and then replayed
+  as history. Reasoning elements are removed before reading (defaults plus
+  `REASONING_SELECTORS`), with a text fallback for a leaked `Thinking…`/`思考中`
+  preamble.
+- **Busy banners are retried.** `服务器繁忙，请稍后再试` and friends are matched
+  in the answer *and* the page title, so an empty answer box during overload
+  fails fast and retries instead of waiting out the timeout.
+- **`EADDRINUSE` printed a stack trace.** Starting the server when it is already
+  running now prints the URL and version and exits 0; a port held by another
+  program gets a plain message with the `PORT` fix.
+
+### Added
+- 22 tests: every tool-call markup, unreadable-block reporting, reasoning
+  stripping (English and Chinese), busy detection, and a real double-start test
+  that asserts a clean exit with no stack trace.
+
 ## 1.5.0
 
 Two things are now automatic: growing the prompt budget, and keeping opencode in
