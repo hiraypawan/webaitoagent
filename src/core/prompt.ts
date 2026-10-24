@@ -9,6 +9,8 @@ export interface BuildPromptOptions {
   maxChars?: number;
   /** Extra instructions appended on top of the system prompt. */
   systemAppend?: string;
+  /** Ask for a bare JSON object (OpenAI `response_format: {type:"json_object"}`). */
+  jsonMode?: boolean;
   /** Called when the mobile-friendly character budget forced an elision. */
   onTrim?: (info: { dropped: number; max: number }) => void;
 }
@@ -137,6 +139,9 @@ function toolChoiceText(toolChoice: unknown, firstTool?: string): string {
  * Build the prompt for a fresh conversation: the whole history is flattened,
  * because the web UI has no idea what OpenAI message roles are.
  */
+const JSON_INSTRUCTION =
+  "- Reply with one valid JSON object and nothing else: no prose, no markdown fences.";
+
 export function buildPrompt(messages: ChatMessage[], opts: BuildPromptOptions = {}): string {
   const maxChars = opts.maxChars ?? 120_000;
   const lines = messages.map(roleLine).filter((line) => line.trim().length > 0);
@@ -144,7 +149,8 @@ export function buildPrompt(messages: ChatMessage[], opts: BuildPromptOptions = 
 
   const tools = formatToolsForPrompt(opts.tools, opts.toolChoice);
   const body = lines.join("\n");
-  const prompt = `${body}${tools}\nAssistant:`;
+  const json = opts.jsonMode ? `\n${JSON_INSTRUCTION}` : "";
+  const prompt = `${body}${tools}${json}\nAssistant:`;
   return applyLimit(prompt, maxChars, opts.onTrim);
 }
 
@@ -177,7 +183,8 @@ export function buildContinuationPrompt(
     prompt = trailing.map(roleLine).join("\n");
   }
 
-  return applyLimit(`${prompt}${tools}`, maxChars, opts.onTrim);
+  const json = opts.jsonMode ? `\n${JSON_INSTRUCTION}` : "";
+  return applyLimit(`${prompt}${tools}${json}`, maxChars, opts.onTrim);
 }
 
 /**

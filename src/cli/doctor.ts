@@ -1,5 +1,7 @@
 import { parseArgs } from "node:util";
 import { apiKey, baseUrl, chat, ensureServer, listModels } from "./client.js";
+import { config } from "../config/index.js";
+import { contextBudget } from "../core/budget.js";
 import { detectShell } from "./shell.js";
 
 interface Check {
@@ -67,6 +69,17 @@ async function main(): Promise<void> {
       shell.kind === "bash"
         ? undefined
         : "Install Git for Windows (git-scm.com) for full bash, or ignore this: the agent uses built-in equivalents.",
+  });
+
+  const budget = contextBudget(config.dataRoot).status();
+  record({
+    name: "Context budget",
+    ok: true,
+    detail:
+      `${budget.budgetChars} characters` +
+      (budget.budgetChars > budget.configuredChars
+        ? ` (grown automatically from ${budget.configuredChars}, ${budget.growthSteps} step(s))`
+        : ` (ceiling ${budget.ceilingChars})`),
   });
 
   const up = await ensureServer({ quiet: true });

@@ -117,12 +117,14 @@ Two usual causes.
 2. **The conversation got too long** for MiMo's web chat box. Check with:
 
    ```bash
-   WEB status
+   WEB doctor
    ```
 
-   If `context.trimmed` is going up, history is being dropped. Start a fresh chat
-   (`/new`), work in smaller steps, or raise `MAX_PROMPT_CHARS` in `.env` and run
-   `WEB setup --force` again so opencode is told the bigger window too.
+   The **Context budget** row shows the size in use. When history has to be
+   trimmed the server grows the budget itself (+25%), remembers it, and updates
+   the `opencode.json` it created. You only need to **restart opencode** so it
+   reads the new window. If the budget stops growing, MiMo will not accept longer
+   input: start a fresh chat (`/new`) or work in smaller steps.
 
 ---
 
