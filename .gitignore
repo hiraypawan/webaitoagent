@@ -1,9 +1,20 @@
 node_modules/
 dist/
+coverage/
+*.tsbuildinfo
+
+# Secrets and machine-local state
 .env
 .env.local
+.env.*.local
 *.log
+profiles/
+.web-agents-to/
+
+# Scratch files
 mimo/
 explore/
 explore-*.ts
 debug-*.ts
+test/.tmp/
+.DS_Store
