@@ -107,9 +107,49 @@ Everything except `/health` requires `Authorization: Bearer $API_KEY`.
 <tool_call name="bash">{"command":"ls"}</tool_call>
 ```
 
-into OpenAI `tool_calls` when the request includes a `tools` array (`NATIVE_TOOLS=true`). Clients that support tools can then run them themselves. Because a call is only complete once it has been fully generated, tool-enabled streams are buffered before the single `tool_calls` delta is sent.
+into OpenAI `tool_calls` when the request includes a `tools` array
+(`NATIVE_TOOLS=true`). Prose streams immediately; a small hold-back buffer stops
+a `<tool_call>` block from leaking into the answer. Call names are matched
+against the request's tools (with aliases like `read_file`→`read`), arguments are
+repaired and schema-checked, and calls that cannot be executed are dropped with a
+note to the model instead of failing the step. Tool deltas carry `id`, `name`,
+valid JSON `arguments` and an `index`, followed by a separate `finish_reason`
+frame — the exact sequence opencode's parser requires.
 
 ---
+
+## Use with opencode
+
+opencode is the intended agent client: it edits your files and runs your build,
+while this server supplies the model. Copy [`docs/opencode.json`](docs/opencode.json)
+into your project as `opencode.json` (or `~/.config/opencode/opencode.json`):
+
+```json
+{
+  "provider": {
+    "web-agents-to": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://127.0.0.1:8787/v1", "apiKey": "web-agents-to" },
+      "models": { "mimo-v2.6-pro": { "name": "MiMo V2.6 Pro", "tool_call": true } }
+    }
+  },
+  "model": "web-agents-to/mimo-v2.6-pro"
+}
+```
+
+`tool_call: true` is what enables tools in opencode — without it the model is
+treated as tool-less and never receives the tool list.
+
+```bash
+WEB doctor        # checks server/auth/models and prints the exact config to paste
+WEB login         # sign in once
+opencode          # in your project directory
+```
+
+Wire-level contract (tool-call deltas carry `id`/`name`/JSON `arguments`; text
+streams before a single `finish_reason`; alias mapping, argument repair and
+schema checks) plus a troubleshooting table live in
+[`docs/OPENCODE.md`](docs/OPENCODE.md).
 
 ## CLI
 
@@ -124,6 +164,7 @@ into OpenAI `tool_calls` when the request includes a `tools` array (`NATIVE_TOOL
 | `WEB chat "prompt"` | One-shot chat (`--json` for machine output) |
 | `WEB start` | Server only |
 | `WEB models` | List models |
+| `WEB doctor [--chat]` | Diagnose API/auth/models and print the opencode config |
 | `WEB login` / `WEB logout` | Manage the provider session |
 | `WEB version` | Version |
 
@@ -199,7 +240,7 @@ To listen beyond loopback, set a strong `API_KEY` and put the server behind TLS 
 
 ```bash
 npm run typecheck   # strict tsc
-npm test            # node:test via tsx (65 tests)
+npm test            # node:test via tsx (75 tests)
 npm run build       # dist/
 npm start           # run the built server
 ```

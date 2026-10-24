@@ -217,9 +217,14 @@ export class BrowserChatProvider implements Provider {
     const isNewConversation = key !== this.lastConversationKey || req.messages.length < this.lastMessageCount;
     if (isNewConversation) await this.startNewChat(page);
 
+    const promptOptions = {
+      tools: req.tools,
+      toolChoice: req.tool_choice,
+      maxChars: this.opts.maxPromptChars,
+    };
     const prompt = isNewConversation
-      ? buildPrompt(req.messages, { tools: req.tools, maxChars: this.opts.maxPromptChars })
-      : buildContinuationPrompt(req.messages, { tools: req.tools, maxChars: this.opts.maxPromptChars });
+      ? buildPrompt(req.messages, promptOptions)
+      : buildContinuationPrompt(req.messages, promptOptions);
 
     if (!prompt.trim()) throw new ProviderError("the request produced an empty prompt", 400);
 

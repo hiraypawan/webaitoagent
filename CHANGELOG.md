@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.2.0
+
+opencode compatibility and a much stricter tool-call layer.
+
+### Fixed
+- **Tool calls now match opencode's parser exactly**: one delta per call with
+  `id`, `type`, `function.name`, valid JSON `arguments` and a numeric `index`,
+  followed by a **separate** `finish_reason: "tool_calls"` frame. Content is
+  never sent after a finish reason.
+- **Text streams immediately even when tools are enabled.** A hold-back buffer
+  suppresses partial `<tool_call>` tags instead of buffering the whole answer.
+- **Missing finish_reason in the plain-text path** (caused "stream ended without
+  a finish reason") — every stream now terminates explicitly.
+- **Wire heartbeat** (`: ping` every 15 s) so long browser generations don't look
+  like a dead connection.
+- **Tool names are validated** against the request's `tools`, with alias mapping
+  (`read_file`→`read`, `shell`→`bash`, …).
+- **Arguments are repaired** (single quotes, trailing commas, comments,
+  unquoted keys, fences, OpenAI/mistral/`tool_calls` shapes) and checked against
+  each tool's `required` fields; unexecutable calls are dropped and reported to
+  the model instead of failing the agent step.
+- `tool_choice: "required"` is forwarded into the prompt.
+- `max_completion_tokens` and `parallel_tool_calls` are accepted from clients.
+
+### Added
+- `WEB doctor [--chat]`: verifies Node, server, auth, models, browser state and
+  end-to-end tool calling, then prints a ready-to-paste `opencode.json`.
+- `docs/OPENCODE.md` (setup, config rationale, wire contract, troubleshooting
+  table) and `docs/opencode.json` example.
+- 10 new tests that assert the opencode/AI-SDK stream contract, including a
+  proof run against `@ai-sdk/openai-compatible` + `ai` v7 in development.
+
 ## 1.1.0
 
 Correctness and security pass over the original prototype.

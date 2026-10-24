@@ -1,6 +1,6 @@
 {
   "name": "web-agents-to",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Turn a free web AI chat UI into a local OpenAI-compatible API, CLI and browser extension.",
   "type": "module",
   "main": "dist/server/main.js",
@@ -26,6 +26,7 @@
     "repl": "tsx src/cli/repl.ts",
     "agent": "tsx src/cli/agent.ts",
     "login": "tsx src/cli/login.ts",
+    "doctor": "tsx src/cli/doctor.ts",
     "logout": "tsx src/cli/logout.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
