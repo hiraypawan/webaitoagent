@@ -5,6 +5,7 @@ import type {
   Provider,
   ProviderModel,
   ProviderStatus,
+  SessionStatus,
 } from "../core/types.js";
 import type { PlaywrightBrowserManager } from "../browser/manager.js";
 import { config } from "../config/index.js";
@@ -23,6 +24,14 @@ import {
 } from "../core/prompt.js";
 import { DeltaTracker, stripBaseline } from "../core/stream.js";
 import { newId, nowSeconds, sleep } from "../core/utils.js";
+import {
+  classifyLoginPage,
+  DEFAULT_OTP_SELECTORS,
+  LoginAttemptGuard,
+  loginHint,
+  summariseCookies,
+  type LoginState,
+} from "./login-flow.js";
 
 export interface SiteConfig {
   id: string;
@@ -39,6 +48,8 @@ export interface SiteConfig {
   usernameSelector?: string;
   passwordSelector?: string;
   loginButtonSelector?: string;
+  /** Inputs that mean "a one-time code is being requested". */
+  otpSelectors?: string;
   /** Substrings that mean "the site is rate limiting us" (safe to retry). */
   busyPatterns?: string[];
   credentials?: { user?: string; pass?: string };
@@ -87,6 +98,8 @@ export class BrowserChatProvider implements Provider {
   private lastConversationKey = "";
   private lastMessageCount = 0;
   private readonly busyPatterns: string[];
+  private loginGuard: LoginAttemptGuard | null = null;
+  private lastLoginState: LoginState = "unknown";
 
   constructor(cfg: SiteConfig, bm: PlaywrightBrowserManager, opts: BrowserChatProviderOptions = {}) {
     this.cfg = cfg;
@@ -122,38 +135,147 @@ export class BrowserChatProvider implements Provider {
     };
   }
 
+  /** Cheap, non-launching report: cookies + why the last auto-login stopped. */
+  async session(): Promise<SessionStatus> {
+    const cookies = await this.bm.cookies(this.id);
+    const launched = this.bm.status(this.id).launched;
+    const record = this.guard().record(this.id);
+
+    return {
+      checked: launched && cookies.length > 0,
+      ...(launched && cookies.length > 0
+        ? { cookies: summariseCookies(cookies, ["pass", "token", "session", "service", "ticket", "userId"]) }
+        : {}),
+      loginState: this.lastLoginState,
+      lastAutoLogin:
+        record?.lastFailureAt && record.lastFailureReason
+          ? { at: new Date(record.lastFailureAt).toISOString(), reason: record.lastFailureReason }
+          : null,
+    };
+  }
+
+  /**
+   * Actively load the chat page to prove the session works. Opt-in because it
+   * starts a browser and may show an OTP prompt.
+   */
+  async probeSession(): Promise<SessionStatus> {
+    const page = await this.getPage();
+    await this.goto(page, this.cfg.chatUrls[0] ?? this.cfg.baseUrl);
+    const state = await this.detectLoginState(page);
+    this.lastLoginState = state;
+
+    const cookies = await this.bm.cookies(this.id);
+    const record = this.guard().record(this.id);
+
+    return {
+      checked: true,
+      signedIn: state === "signed_in",
+      needsLogin: state !== "signed_in",
+      loginState: state,
+      url: page.url(),
+      cookies: summariseCookies(cookies, ["pass", "token", "session", "service", "ticket", "userId"]),
+      lastAutoLogin:
+        record?.lastFailureAt && record.lastFailureReason
+          ? { at: new Date(record.lastFailureAt).toISOString(), reason: record.lastFailureReason }
+          : null,
+    };
+  }
+
   async close(): Promise<void> {
     this.page = null;
     await this.bm.closeProvider(this.id);
   }
 
+  private guard(): LoginAttemptGuard {
+    if (!this.loginGuard) {
+      this.loginGuard = new LoginAttemptGuard(this.bm.dataRoot(), {
+        cooldownMs: config.loginCooldownMs,
+      });
+    }
+    return this.loginGuard;
+  }
+
+  /** Read the page and decide which stage of the login flow it is at. */
+  private async detectLoginState(page: Page): Promise<LoginState> {
+    const hasChatInput = Boolean(await this.findInput(page));
+    const hasPasswordField = await page
+      .locator(this.cfg.passwordSelector ?? "input[type='password']")
+      .first()
+      .isVisible()
+      .catch(() => false);
+    const hasOtpField = await page
+      .locator(this.cfg.otpSelectors ?? DEFAULT_OTP_SELECTORS)
+      .first()
+      .isVisible()
+      .catch(() => false);
+    const text = await page
+      .locator("body")
+      .innerText({ timeout: 5_000 })
+      .catch(() => "")
+      .then((value) => value.slice(0, 4_000));
+
+    return classifyLoginPage({
+      url: page.url(),
+      hasChatInput,
+      hasPasswordField,
+      hasOtpField,
+      text,
+    });
+  }
+
   async login(headed = true): Promise<void> {
     const ctx = headed ? await this.bm.openHeaded(this.id) : await this.bm.context(this.id);
     const page = ctx.pages().find((candidate) => !candidate.isClosed()) ?? (await ctx.newPage());
-    await page
-      .goto(this.cfg.baseUrl, { waitUntil: "domcontentloaded", timeout: 60_000 })
-      .catch(() => {});
+    await page.goto(this.cfg.baseUrl, { waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => {});
 
     if (!headed) {
       log.warn("[login] HEADLESS=true: a visible window is required to sign in.");
       return;
     }
 
-    log.info(`[login] Opened ${this.cfg.baseUrl}. Sign in, then close the browser window.`);
-    await new Promise<void>((resolve) => {
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        resolve();
-      };
-      ctx.once("close", finish);
-      page.once("close", finish);
-    });
+    log.info(
+      [
+        "",
+        `[login] A browser window is open at ${this.cfg.baseUrl}.`,
+        "[login] Sign in with your email + password, then enter the one-time code.",
+        "[login] The window closes by itself once the chat box is available.",
+        "",
+      ].join("\n")
+    );
 
+    const deadline = Date.now() + config.loginTimeoutMs;
+    let state: LoginState = "unknown";
+
+    while (Date.now() < deadline) {
+      if (ctx.pages().length === 0 || page.isClosed()) {
+        log.warn("[login] window closed before sign-in completed");
+        break;
+      }
+      state = await this.detectLoginState(page);
+      this.lastLoginState = state;
+      if (state === "signed_in") break;
+      if (state === "verification_required") {
+        log.info("[login] waiting for the one-time code to be entered...");
+      }
+      await page.waitForTimeout(2_000);
+    }
+
+    if (state === "signed_in") {
+      this.guard().recordSuccess(this.id);
+      this.lastLoginState = "signed_in";
+      // Give the browser a moment to flush cookies to the profile on disk.
+      await page.waitForTimeout(1_500);
+      this.page = null;
+      this.lastConversationKey = "";
+      log.info("[login] signed in; the session is saved and will be reused.");
+      // Release the profile so the server can relaunch it headless.
+      await this.bm.closeProvider(this.id);
+      return;
+    }
+
+    this.guard().recordFailure(this.id, state);
     this.page = null;
-    this.lastConversationKey = "";
-    log.info("[login] Profile saved; the session will be reused by the server.");
+    throw new LoginRequiredError(`sign-in did not complete (${state})`, loginHint(state, this.cfg.loginHint));
   }
 
   async *chat(req: ChatCompletionRequest, signal?: AbortSignal): AsyncGenerator<ChatChunk> {
@@ -341,48 +463,71 @@ export class BrowserChatProvider implements Provider {
 
   private async openChatPage(signal?: AbortSignal): Promise<Page> {
     const page = await this.getPage();
-
     if (await this.findInput(page)) return page;
 
-    for (const url of this.cfg.chatUrls) {
+    // Visit each candidate once. Bail out as soon as the page is obviously a
+    // login/verification screen: reloading it cannot produce a chat box, and a
+    // signed-out request should fail fast instead of eating the timeout.
+    const urls = [...new Set([...this.cfg.chatUrls, this.cfg.baseUrl].filter(Boolean))];
+    let state: LoginState = "unknown";
+
+    for (const url of urls) {
       signal?.throwIfAborted();
       await this.goto(page, url);
       if (await this.findInput(page)) return page;
-    }
 
-    signal?.throwIfAborted();
-    await this.goto(page, this.cfg.baseUrl);
-    if (await this.findInput(page)) return page;
-
-    if (this.cfg.credentials?.user && this.cfg.credentials?.pass && this.cfg.loginUrl) {
-      await this.autoLogin(page);
-      for (const url of this.cfg.chatUrls) {
-        await this.goto(page, url);
-        if (await this.findInput(page)) return page;
+      state = await this.detectLoginState(page);
+      this.lastLoginState = state;
+      if (state === "verification_required" || state === "blocked" || state === "credentials_form") {
+        break;
       }
     }
 
-    if (!(await this.findInput(page))) {
+    // A one-time-code or lockout screen cannot be passed by automation.
+    if (state === "verification_required" || state === "blocked") {
       throw new LoginRequiredError(
-        `not signed in to ${this.id} (no chat input found at ${page.url()})`,
-        this.cfg.loginHint
+        `not signed in to ${this.id} (${state} at ${page.url()})`,
+        loginHint(state, this.cfg.loginHint)
+      );
+    }
+
+    const canAutoLogin = Boolean(
+      this.cfg.credentials?.user && this.cfg.credentials?.pass && this.cfg.loginUrl
+    );
+    if (state !== "signed_in" && canAutoLogin) {
+      const after = await this.autoLogin(page);
+      if (after === "verification_required" || after === "blocked") {
+        throw new LoginRequiredError(
+          `not signed in to ${this.id} (${after} at ${page.url()})`,
+          loginHint(after, this.cfg.loginHint)
+        );
+      }
+      if (after === "signed_in") {
+        for (const url of urls) {
+          await this.goto(page, url);
+          if (await this.findInput(page)) return page;
+        }
+      }
+    }
+
+    const finalState = await this.detectLoginState(page);
+    this.lastLoginState = finalState;
+    if (finalState !== "signed_in") {
+      throw new LoginRequiredError(
+        `not signed in to ${this.id} (${finalState} at ${page.url()})`,
+        loginHint(finalState, this.cfg.loginHint)
       );
     }
     return page;
   }
 
-  /**
-   * Navigate without waiting for networkidle: provider SPAs keep websockets and
-   * pollers open, so networkidle never fires and every load burns the timeout.
-   * Instead we wait for the DOM and then for one of the input selectors.
-   */
   private async goto(page: Page, url: string): Promise<void> {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => {});
     await this.waitForInput(page);
     await this.dismissCookieBanner(page);
   }
 
-  private async waitForInput(page: Page, timeoutMs = 20_000): Promise<boolean> {
+  private async waitForInput(page: Page, timeoutMs = 6_000): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     do {
       if (await this.findInput(page)) return true;
@@ -397,15 +542,36 @@ export class BrowserChatProvider implements Provider {
     return this.page;
   }
 
-  private async autoLogin(page: Page): Promise<void> {
+  /**
+   * Optional email+password pre-fill. It can never finish a login on its own:
+   * the provider asks for a one-time code afterwards, which needs a human.
+   *
+   * The guard is the important part — repeated failed password submissions are
+   * what trigger lockouts and captchas, so this runs at most once per cooldown
+   * and gives up immediately when it detects the verification screen.
+   */
+  private async autoLogin(page: Page): Promise<LoginState> {
     const user = this.cfg.credentials?.user;
     const pass = this.cfg.credentials?.pass;
-    if (!user || !pass || !this.cfg.loginUrl) return;
+    if (!user || !pass || !this.cfg.loginUrl) return "unknown";
 
-    log.info(`[${this.id}] attempting password login for ${user}`);
+    const guard = this.guard();
+    const permission = guard.canAttempt(this.id);
+    if (!permission.allowed) {
+      const minutes = Math.ceil((permission.retryInMs ?? 0) / 60_000);
+      log.warn(
+        `[${this.id}] skipping automatic login (${permission.reason}); next attempt allowed in ~${minutes} min`
+      );
+      return this.lastLoginState;
+    }
+
+    log.info(`[${this.id}] attempting password pre-fill for ${redact(user)}`);
+    guard.recordAttempt(this.id);
+
     try {
       await page.goto(this.cfg.loginUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
       await page.waitForTimeout(2_000);
+
       const userInput = page.locator(this.cfg.usernameSelector ?? "input[name='account']").first();
       const passInput = page.locator(this.cfg.passwordSelector ?? "input[name='password']").first();
       await userInput.fill(user, { timeout: 15_000 });
@@ -419,15 +585,37 @@ export class BrowserChatProvider implements Provider {
 
       const button = page.locator(this.cfg.loginButtonSelector ?? "button:has-text('Sign in')").first();
       await button.click({ timeout: 15_000 });
-      await page.waitForTimeout(5_000);
+      await page.waitForTimeout(4_000);
 
       const agree = page.locator("button:has-text('Agree')").first();
       if (await agree.isVisible().catch(() => false)) {
         await agree.click().catch(() => {});
-        await page.waitForTimeout(5_000);
+        await page.waitForTimeout(3_000);
       }
+
+      const state = await this.detectLoginState(page);
+      this.lastLoginState = state;
+
+      if (state === "signed_in") {
+        guard.recordSuccess(this.id);
+        log.info(`[${this.id}] automatic login succeeded`);
+        return state;
+      }
+
+      guard.recordFailure(this.id, state);
+      if (state === "verification_required") {
+        log.warn(
+          `[${this.id}] a one-time code is required; finish the login once with \`WEB login\`. ` +
+            "Automatic login is paused to avoid lockouts."
+        );
+      } else {
+        log.warn(`[${this.id}] automatic login stopped at state "${state}"`);
+      }
+      return state;
     } catch (error) {
+      guard.recordFailure(this.id, "error");
       log.warn(`[${this.id}] automatic login failed: ${describe(error)}`);
+      return this.lastLoginState;
     }
   }
 
@@ -589,6 +777,14 @@ export class BrowserChatProvider implements Provider {
     const reason = combined.reason;
     return reason instanceof Error ? reason : new RequestAbortedError();
   }
+}
+
+/** Keep logs useful without printing a full email address. */
+function redact(value: string): string {
+  const [local, domain] = value.split("@");
+  if (!domain) return "***";
+  const head = local.slice(0, 2);
+  return `${head}${"*".repeat(Math.max(1, local.length - 2))}@${domain}`;
 }
 
 function describe(error: unknown): string {

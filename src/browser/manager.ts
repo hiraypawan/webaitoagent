@@ -42,6 +42,11 @@ export class PlaywrightBrowserManager {
     };
   }
 
+  /** Directory that holds all provider profiles and sidecar state. */
+  dataRoot(): string {
+    return this.opts.userDataRoot;
+  }
+
   profileDir(providerId: string): string {
     return path.join(this.opts.userDataRoot, providerId);
   }
@@ -83,6 +88,17 @@ export class PlaywrightBrowserManager {
       }
       return this.launch(providerId, false);
     });
+  }
+
+  /** Cookies of an already-running context; never launches a browser. */
+  async cookies(providerId: string): Promise<{ name: string; expires: number; domain: string }[]> {
+    const ctx = this.contexts.get(providerId);
+    if (!ctx) return [];
+    try {
+      return await ctx.cookies();
+    } catch {
+      return [];
+    }
   }
 
   isHeaded(providerId: string): boolean {

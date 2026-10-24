@@ -21,11 +21,25 @@ async function main(): Promise<void> {
   const values = parseArgs({
     args: process.argv.slice(2),
     allowPositionals: true,
-    options: { chat: { type: "boolean" }, help: { type: "boolean", short: "h" } },
+    options: {
+      chat: { type: "boolean" },
+      probe: { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
   }).values;
 
   if (values.help) {
-    console.log("Usage: WEB doctor [--chat]\n\nChecks the local API and prints the opencode config.");
+    console.log(
+      [
+        "Usage: WEB doctor [--chat] [--probe]",
+        "",
+        "  --chat   send one real request that must produce a tool call",
+        "  --probe  actively load the provider page to verify the saved session",
+        "           (starts the browser; may be slow)",
+        "",
+        "Prints a check summary and a ready-to-paste opencode config.",
+      ].join("\n")
+    );
     return;
   }
 
@@ -87,6 +101,60 @@ async function main(): Promise<void> {
       : "not started yet — starts on the first request",
   });
 
+  // Session health. Read-only unless --probe is passed: MiMo signs in with a
+  // one-time code, so logging in is always a manual step.
+  try {
+    const url = `${baseUrl()}/auth/session${values.probe ? "?probe=1" : ""}`;
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${apiKey()}` } });
+    const body = (await response.json()) as {
+      session?: {
+        checked?: boolean;
+        signedIn?: boolean;
+        needsLogin?: boolean;
+        loginState?: string;
+        cookies?: { cookies?: number; daysRemaining?: number; hasAuthCookie?: boolean };
+        lastAutoLogin?: { at: string; reason: string } | null;
+      };
+    };
+    const session = body.session ?? {};
+
+    if (values.probe) {
+      record({
+        name: "Session (probed)",
+        ok: session.signedIn === true,
+        detail: session.signedIn
+          ? `signed in${session.cookies?.daysRemaining !== undefined ? `, cookie expires in ~${session.cookies.daysRemaining}d` : ""}`
+          : `not usable (${session.loginState ?? "unknown"})`,
+        fix: session.signedIn ? undefined : "Run `WEB login` and complete the one-time code.",
+      });
+    } else {
+      const days = session.cookies?.daysRemaining;
+      record({
+        name: "Session",
+        ok: true,
+        detail: session.checked
+          ? `${session.cookies?.cookies ?? 0} cookie(s)${session.cookies?.hasAuthCookie ? ", auth cookie present" : ""}` +
+            (days !== undefined ? `, expires in ~${days}d` : "")
+          : "not inspected yet — run `WEB login`, or `WEB doctor --probe` to verify",
+      });
+    }
+
+    if (session.lastAutoLogin) {
+      record({
+        name: "Automatic login",
+        ok: false,
+        detail: `paused after ${session.lastAutoLogin.reason} at ${session.lastAutoLogin.at}`,
+        fix: "Expected when the provider asks for a one-time code. Finish a login with `WEB login`.",
+      });
+    }
+  } catch (error) {
+    record({
+      name: "Session",
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   if (values.chat) {
     const model = models[0]?.id ?? "mimo/mimo-v2.6-pro";
     console.log(`\nSending a tool-enabled test request to ${model} (this uses the model once)...`);
@@ -133,9 +201,11 @@ async function main(): Promise<void> {
         name: "Tool call end to end",
         ok: false,
         detail: message,
-        fix: /login|sign in|401/i.test(message)
-          ? "Run `WEB login` to sign in to the provider first."
-          : "Check the server log for the provider error.",
+        fix: /one-time code|verification/i.test(message)
+          ? "The provider wants a one-time code: run `WEB login` and complete it there."
+          : /login|sign in|401/i.test(message)
+            ? "Run `WEB login` to sign in to the provider first."
+            : "Check the server log for the provider error.",
       });
     }
   }

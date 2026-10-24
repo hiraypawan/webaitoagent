@@ -39,7 +39,23 @@ npm run login -- --provider=mimo
 # or: WEB login
 ```
 
-A **visible** browser opens. Sign in (Google SSO or Xiaomi account), then close the window. The session is stored in `~/.web-agents-to/profiles/mimo` and reused on every restart.
+A **visible** browser opens. Sign in with your Xiaomi account — email + password,
+then the **one-time code** they send you — and that is it: the window closes by
+itself once the chat box appears (`LOGIN_TIMEOUT_MS`, default 5 min). The session
+is stored in `~/.web-agents-to/profiles/mimo` and reused on every restart.
+
+Logging in is deliberately a **manual, once-in-a-while** step:
+
+- The one-time code means a saved password can never finish a login on its own;
+  `MIMO_USER`/`MIMO_PASS` only pre-fill the form, and that pre-fill is rate
+  limited (`LOGIN_COOLDOWN_MS`, default 15 min) because repeated failed password
+  attempts are exactly what triggers lockouts.
+- When the session dies, requests fail fast with a `login_required` error and an
+  actionable hint instead of retrying forever.
+- Check session health at any time: `WEB doctor` shows cookie lifetime,
+  `WEB doctor --probe` loads the page and confirms you are really signed in.
+- `WEB logout` closes the browser; delete `~/.web-agents-to/profiles/mimo` to
+  forget the session entirely.
 
 Set `HEADLESS=false` if you prefer to watch the automation work.
 
@@ -95,6 +111,7 @@ In Cline / Continue / opencode / LangChain, set the base URL to `http://127.0.0.
 | `GET` | `/v1/models` | yes | Models in OpenAI `list` shape |
 | `POST` | `/v1/chat/completions` | yes | Chat, `stream: true` or JSON |
 | `POST` | `/auth/login` | yes | Opens a headed browser for sign-in |
+| `GET` | `/auth/session` | yes | Cookie/session health (`?probe=1` verifies it live) |
 | `POST` | `/auth/logout` | yes | Closes the provider browser |
 
 Everything except `/health` requires `Authorization: Bearer $API_KEY`.
@@ -196,7 +213,9 @@ Copy `.env.example` to `.env`. The important ones:
 | `PROFILE_ROOT` | `~/.web-agents-to/profiles` | Login profiles |
 | `SITE_OVERRIDES` | – | JSON patch for selectors when a site changes |
 | `CHROMIUM_EXECUTABLE` | – | Use an existing Chromium binary instead of Playwright's download |
-| `MIMO_USER` / `MIMO_PASS` | – | Optional Xiaomi password auto-login |
+| `MIMO_USER` / `MIMO_PASS` | – | Optional form pre-fill (one-time code still needs you) |
+| `LOGIN_TIMEOUT_MS` | `300000` | How long `WEB login` waits for you |
+| `LOGIN_COOLDOWN_MS` | `900000` | Cooldown between automatic password attempts |
 | `REQUEST_TIMEOUT_MS` | `180000` | Whole-request budget |
 | `STREAM_POLL_MS` | `250` | DOM polling interval |
 | `STREAM_IDLE_POLLS` | `6` | Unchanged polls that mean "done" |

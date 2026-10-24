@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.3.0
+
+Login/session handling for the real MiMo flow (**email + password + one-time
+code**), plus the audit fixes from 1.2.1.
+
+### Added
+- **OTP-aware login detection** (`src/providers/login-flow.ts`): distinguishes
+  `signed_in`, `credentials_form`, `verification_required` and `blocked`
+  (lockout/captcha) from page content, in English and Chinese.
+- **`WEB login` now waits for the sign-in to finish** and closes the browser
+  itself once the chat box appears (`LOGIN_TIMEOUT_MS`), instead of asking you to
+  close the window and hoping.
+- **Login attempt guard**: at most one automatic password submission per
+  cooldown (`LOGIN_COOLDOWN_MS`, persisted in `~/.web-agents-to/login-state.json`,
+  mode 0600). Stops the automation from triggering lockouts/captchas.
+- **`GET /auth/session`** (+ `?probe=1`) and `WEB doctor --probe`: cookie count,
+  soonest expiry in days, auth-cookie presence, last abandoned auto-login.
+- `/status` includes a session summary; it still never launches a browser.
+
+### Fixed
+- Signed-out requests **fail fast** with an actionable hint (`one-time code`,
+  lockout, or "run WEB login") instead of crawling every URL twice and burning
+  the request timeout.
+- Auto-login no longer re-submits credentials on every failed request.
+- Email addresses are redacted in logs.
+
+
 ## 1.2.1
 
 Audit pass, verified with a real browser.

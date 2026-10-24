@@ -147,7 +147,24 @@ you do not want to maintain a reverse-engineering effort that week.
 
 ---
 
-## 7. Decisions I need from you
+## 7. Decisions (answered 2026-10-24)
+
+**1. Official API: NO.** The owner wants web-chat-only; no key, no billing.
+→ **P0 is dropped.** Keep `docs/PLAN.md` P0 as a documented escape hatch only.
+
+**2. MiMo login is email + password + a one-time code.** → Implemented in 1.3.0:
+OTP detection, fail-fast hints, `WEB login` that waits for the code and closes
+itself, a persisted attempt guard, and `/auth/session` + `WEB doctor --probe` so
+a dead session is visible before an agent run. Auto-login can only pre-fill and
+is rate limited; it can never complete a login, and it no longer retries.
+
+**3. ToS risk on session replay: not answered.** P1 stays blocked until it is.
+
+Consequence: with P0 removed, **P1 (replaying the site's own chat endpoint with
+the saved session) is the only remaining way to get real token streaming and to
+stop depending on DOM selectors.** Everything else is hardening.
+
+## 8. Original decision list (for the record)
 
 1. **Do you want the official API route at all** (paid, ~$0.18 for a heavy day,
    but native tool calling + 1M context + no bans)? If yes, P0 is the next thing

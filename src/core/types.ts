@@ -112,6 +112,26 @@ export interface QueueStatus {
   waiting: number;
 }
 
+export interface SessionCookieSummary {
+  cookies: number;
+  sessionCookies: number;
+  expiresAt?: string;
+  daysRemaining?: number;
+  hasAuthCookie: boolean;
+}
+
+export interface SessionStatus {
+  /** False when no browser is running (nothing was inspected). */
+  checked: boolean;
+  signedIn?: boolean;
+  needsLogin?: boolean;
+  loginState?: string;
+  cookies?: SessionCookieSummary;
+  url?: string;
+  /** Why the last automatic login attempt was abandoned, if any. */
+  lastAutoLogin?: { at: string; reason: string } | null;
+}
+
 export interface ProviderStatus {
   id: string;
   name: string;
@@ -131,5 +151,9 @@ export interface Provider {
   /** Optional manual login flow (opens a headed browser). */
   login?(headed: boolean): Promise<void>;
   status?(): ProviderStatus | Promise<ProviderStatus>;
+  /** Cheap session report; must not launch a browser. */
+  session?(): Promise<SessionStatus> | SessionStatus;
+  /** Actively verify the session by loading the chat page (opt-in). */
+  probeSession?(): Promise<SessionStatus>;
   close?(): Promise<void>;
 }
