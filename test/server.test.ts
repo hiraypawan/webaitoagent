@@ -36,6 +36,19 @@ describe("health & auth", () => {
     }
   });
 
+  it("reports the real context budget and any trimming", async () => {
+    const status = await app.inject({ method: "GET", url: "/status", headers: auth });
+    const body = status.json();
+    assert.equal(typeof body.context.budgetChars, "number");
+    assert.ok(body.context.budgetChars > 0);
+    assert.equal(typeof body.context.trimmed, "number");
+
+    const models = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
+    const first = models.json().data[0];
+    // Same derivation the generated opencode.json uses: compaction before trimming.
+    assert.equal(first.context_length, Math.floor(body.context.budgetChars * 0.9 / 4));
+  });
+
   it("rejects a wrong key", async () => {
     const response = await app.inject({
       method: "GET",

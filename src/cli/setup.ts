@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { config } from "../config/index.js";
 import { baseUrl, ensureServer, health, listModels } from "./client.js";
 import {
   buildOpencodeConfig,
@@ -110,13 +111,15 @@ async function main(): Promise<void> {
 
   // 4. opencode config
   const targetDir = path.resolve(values.dir ?? process.cwd());
-  const config = buildOpencodeConfig();
+  const opencodeConfig = buildOpencodeConfig(undefined, undefined, {
+    maxPromptChars: config.maxPromptChars,
+  });
 
   if (values["no-write"]) {
     console.log("\nopencode config (save as opencode.json in your project):\n");
-    console.log(JSON.stringify(config, null, 2));
+    console.log(JSON.stringify(opencodeConfig, null, 2));
   } else {
-    const result = writeOpencodeConfig(targetDir, config, { force: values.force });
+    const result = writeOpencodeConfig(targetDir, opencodeConfig, { force: values.force });
     let step: StepResult;
     if (result.written) {
       step = { title: "opencode config", state: "ok", detail: result.path };

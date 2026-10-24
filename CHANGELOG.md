@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.3.2
+
+Made the two context limits agree, and stopped history from disappearing silently.
+
+opencode compacts a conversation based on the context size it is told about. The
+browser bridge has its own hard character budget. When the declared size was
+larger than the budget, the bridge quietly cut the middle out of the prompt and
+opencode never knew to compact first.
+
+### Changed
+- `WEB setup` now derives the declared `limit.context` **from** `MAX_PROMPT_CHARS`
+  with 10% headroom, so opencode compacts *before* the bridge would need to trim
+  (120k chars → 27k tokens, instead of a hard-coded 30k).
+- `/v1/models` advertises `context_length` for clients that size themselves from
+  it.
+
+### Added
+- Trimming is now reported, never silent: one warning per trimmed request
+  (`history trimmed: dropped N characters`) plus counters in `/status`
+  (`context.trimmed`, `context.droppedChars`, `context.lastTrimAt`).
+- 7 tests covering the budget callback, the stats, and the derived context size.
+
 ## 1.3.1
 
 Made usable without reading the whole README.

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { contextTokensFor } from "../core/context-stats.js";
 import { baseUrl, apiKey } from "./client.js";
 
 /**
@@ -35,7 +36,12 @@ export interface OpencodeModelOptions {
   providerId?: string;
   model?: string;
   name?: string;
+  /** Hard character budget the bridge enforces on one prompt. */
+  maxPromptChars?: number;
 }
+
+// One definition, shared with the server so every surface reports the same number.
+export { contextTokensFor };
 
 /**
  * Build the opencode config. Model keys are the bare id (`mimo-v2.6-pro`):
@@ -49,6 +55,7 @@ export function buildOpencodeConfig(
 ): Record<string, unknown> {
   const providerId = options.providerId ?? "web-agents-to";
   const model = options.model ?? "mimo-v2.6-pro";
+  const contextTokens = contextTokensFor(options.maxPromptChars ?? 120_000);
 
   return {
     $schema: "https://opencode.ai/config.json",
@@ -66,7 +73,7 @@ export function buildOpencodeConfig(
             reasoning: false,
             attachment: false,
             temperature: false,
-            limit: { context: 30000, output: 8000 },
+            limit: { context: contextTokens, output: 8000 },
           },
         },
       },
