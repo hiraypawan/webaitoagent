@@ -200,6 +200,40 @@ describe("streaming completions", () => {
     provider.chunks = ["Hel", "lo"];
   });
 
+  it("recovers a tool call whose closing tag was never captured", async () => {
+    provider.chunks = ['<tool_call name="read"><parameter=path>README.md'];
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: payload({
+        stream: true,
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "read",
+              parameters: {
+                type: "object",
+                properties: { filePath: { type: "string" } },
+                required: ["filePath"],
+              },
+            },
+          },
+        ],
+      }),
+    });
+
+    const frames = await sseFrames(response.body);
+    const call = frames.find((frame) => frame.choices?.[0]?.delta?.tool_calls)?.choices[0].delta
+      .tool_calls[0];
+    assert.ok(call, "expected a tool_calls frame");
+    assert.equal(call.function.name, "read");
+    assert.deepEqual(JSON.parse(call.function.arguments), { filePath: "README.md" });
+    assert.equal(frames.at(-1)!.choices[0].finish_reason, "tool_calls");
+    provider.chunks = ["Hel", "lo"];
+  });
+
   it("explains an unreadable tool block instead of answering with the failure", async () => {
     provider.chunks = ["<tool_call>\nI will list the files now.\n</tool_call>"];
     const response = await app.inject({

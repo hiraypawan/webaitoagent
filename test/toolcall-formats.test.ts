@@ -128,6 +128,14 @@ describe("MiMo's real markup", () => {
     assert.equal(calls[0]!.args.filePath, "README.md");
   });
 
+  it("recovers a <tool_call> whose closing tag was cut off", () => {
+    const text = '<tool_call name="read"><parameter=path>README.md';
+    const { calls, dropped } = parseToolCallsDetailed(text, opencodeOptions);
+    assert.equal(dropped.length, 0, JSON.stringify(dropped));
+    assert.equal(calls[0]!.name, "read");
+    assert.equal(calls[0]!.args.filePath, "README.md");
+  });
+
   it("uses the only declared parameter for a bare argument", () => {
     const text = '<tool_call name="read">D:\\AgentsAI\\WEB AGENTS TO\\package.json</tool_call>';
     const { calls } = parseToolCallsDetailed(text, opencodeOptions);
@@ -198,6 +206,10 @@ I will now list the files.
     const text = `Here you go.
 <tool_call name="bash">{"command":"dir"}</tool_call>`;
     assert.equal(stripToolCalls(text), "Here you go.");
+    assert.equal(
+      stripToolCalls('Here you go.\n<tool_call name="read">README.md'),
+      "Here you go."
+    );
     assert.ok(hasToolCalls(text));
     assert.ok(hasToolCalls("<function=bash><parameter=command>ls</parameter></function>"));
   });

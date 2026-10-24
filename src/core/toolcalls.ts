@@ -121,7 +121,7 @@ export function parseToolCallsDetailed(
 ): ToolCallParseResult {
   if (!text) return { calls: [], dropped: [] };
 
-  const raws = collectRawCalls(text, options);
+  const raws = collectRawCalls(closeUnterminatedToolBlock(text), options);
 
   const calls: ParsedToolCall[] = [];
   const dropped: ParsedToolCall[] = [];
@@ -260,6 +260,19 @@ function xmlParameters(body: string): Record<string, unknown> | undefined {
   }
   XML_PARAMETER.lastIndex = 0;
   return found ? params : undefined;
+}
+
+/**
+ * MiMo sometimes stops before `</tool_call>` (a slow DOM read or a cut-off
+ * answer). Add the missing close so the normal block parser can still read the
+ * call instead of reporting "the block was not closed".
+ */
+function closeUnterminatedToolBlock(text: string): string {
+  const lower = text.toLowerCase();
+  const lastOpen = lower.lastIndexOf("<tool_call");
+  if (lastOpen === -1) return text;
+  if (lower.lastIndexOf("</tool_call>") > lastOpen) return text;
+  return `${text}</tool_call>`;
 }
 
 /**
@@ -703,6 +716,7 @@ export function stripToolCalls(text: string): string {
   return text
     .replace(TOOL_BLOCK, "")
     .replace(XML_FUNCTION_ANYWHERE, "")
+    .replace(/<tool_call\b[^>]*>[\s\S]*$/i, "")
     .replace(/\[TOOL_CALLS\][\s\S]*$/u, "")
     .replace(/\n{3,}/gu, "\n\n")
     .trim();

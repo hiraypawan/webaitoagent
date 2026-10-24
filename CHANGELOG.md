@@ -7,9 +7,9 @@ recognised but executed with the wrong arguments, and a false "server busy".
 
 ### Fixed
 - **MiMo's cut-off tool markup is executable.** `<function=read>` with no
-  `</function>` or `</parameter>`, `<tool_call name=read>` with XML
-  `<parameter>` children, a name followed by `<parameter>`, and a bare single
-  argument all map onto the declared tool schema.
+  `</function>`, `</parameter>`, or `</tool_call>`; `<tool_call name=read>` with
+  XML `<parameter>` children; a name followed by `<parameter>`; and a bare
+  single argument all map onto the declared tool schema.
 - **Windows paths no longer corrupt tool arguments.** MiMo writes
   `D:\project\file.ts` inside JSON without escaping the backslashes, which is
   invalid JSON. The parser now repairs path-looking strings, so `read` receives
@@ -26,7 +26,7 @@ recognised but executed with the wrong arguments, and a false "server busy".
   of 45, with the page title included in the timeout error.
 
 ### Added
-- 12 more tests, including the exact MiMo markup and the HTTP/SSE translation
+- 14 more tests, including the exact MiMo markup and the HTTP/SSE translation
   opencode consumes.
 
 ## 1.5.1
