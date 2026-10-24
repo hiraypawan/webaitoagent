@@ -1,7 +1,6 @@
 # Web Agents To
 
-Bridge free web AI models (Xiaomi MiMo Studio, etc.) to a local OpenAI-compatible API,
-CLI, and browser extension.
+Bridge free web AI flagship models (Xiaomi MiMo V2.6 Pro, etc.) to a local OpenAI-compatible API, CLI, and browser extension.
 
 ## Quick start
 
@@ -12,32 +11,46 @@ npm run dev
 
 Server runs on http://127.0.0.1:8787
 
-### Login to a provider (MiMo)
+### Login to MiMo
 
 ```bash
-# start server first, then:
 npm run login -- --provider=mimo
 ```
 
-A headed browser opens. Log in with your Xiaomi account, then close the window.
-The session (cookies) is persisted under ~/.web-agents-to/profiles/mimo.
+A browser opens for Xiaomi account login. Close it when done — session saved to `~/.web-agents-to/profiles/mimo`.
 
-You can also set MIMO_USER / MIMO_PASS in .env for automatic login attempts.
+Or set `.env`:
+```
+MIMO_USER=justcheck008@gmail.com
+MIMO_PASS=Nawap@098
+```
 
-### Use the CLI
+### CLI chat
 
 ```bash
 npm run cli -- "Hello, who are you?" --model=mimo/mimo-v2.6-pro
 ```
 
-### Agentic coding (tool use)
+### Interactive chat
 
 ```bash
-WEB agent "list the files in this directory and summarize the project"
+WEB
+```
+
+Type prompts and get streamed responses from MiMo V2.6 Pro.
+
+### Agentic CLI (tools)
+
+`WEB` runs an agent loop with local tools: `bash`, `read_file`, `write_file`, `list_dir`.
+
+```bash
+WEB
+Agent> list the files here and summarize this project
+
 WEB agent "read README.md and suggest improvements"
 ```
 
-The agent runs a loop: MiMo decides which tools to call (bash, read_file, write_file, list_dir), the tool runs locally, results feed back to MiMo, repeat until done. This gives you an agentic coding assistant on the free MiMo flagship model.
+The model emits `<tool_call name="...">`, the CLI executes it locally, feeds the result back, and repeats until done. This gives you a local coding agent on the free web model.
 
 ### OpenAI-compatible API
 
@@ -52,7 +65,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 ### Browser extension
 
-Load the `extension/` folder as an unpacked extension in Chrome/Edge.
+Load `extension/` folder as unpacked extension in Chrome/Edge.
 
 ## Configuration (.env)
 
@@ -65,18 +78,12 @@ MIMO_USER=
 MIMO_PASS=
 ```
 
-## Notes
-
-- This automates the public web UI of providers; it is not an official API.
-- Respect each provider's Terms of Service. Free tiers may have rate limits.
-- Selectors are best-effort; if a site changes its UI, update src/providers/*.ts.
-
 ## Architecture
 
 - src/core: shared types
-- src/browser: Playwright persistent-context manager
-- src/providers: site adapters (MiMo, Mock)
+- src/browser: Playwright persistent-context manager (reuses session, no new page per request)
+- src/providers: MiMo adapter with retry logic
 - src/server: Fastify OpenAI-compatible server
-- src/cli: CLI client + login helper
+- src/cli: CLI client + interactive REPL
 - extension: Chrome extension (Manifest V3)
-EOF
+- bin/web.js: `WEB` launcher command
