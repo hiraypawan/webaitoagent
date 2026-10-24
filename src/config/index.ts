@@ -86,7 +86,7 @@ export const config = {
   streamPollMs: int("STREAM_POLL_MS", 250, 50),
   streamIdlePolls: int("STREAM_IDLE_POLLS", 6, 1),
   streamMaxWaitMs: int("STREAM_MAX_WAIT_MS", 180_000, 1_000),
-  streamStartTimeoutMs: int("STREAM_START_TIMEOUT_MS", 45_000, 1_000),
+  streamStartTimeoutMs: int("STREAM_START_TIMEOUT_MS", 75_000, 1_000),
   providerRetries: int("PROVIDER_RETRIES", 3, 1),
   providerRetryDelayMs: int("PROVIDER_RETRY_DELAY_MS", 2_000, 0),
   maxQueue: int("MAX_QUEUE", 16, 0),

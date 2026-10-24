@@ -89,6 +89,90 @@ dir /b
   });
 });
 
+const opencodeOptions = {
+  allowedTools: ["bash", "read", "write", "edit", "list", "glob", "grep"],
+  toolSchemas: {
+    read: { required: ["filePath"], properties: ["filePath", "offset", "limit"] },
+    bash: { required: ["command"], properties: ["command", "shell", "cwd"] },
+    glob: { required: ["pattern"], properties: ["pattern", "path"] },
+  },
+};
+
+describe("MiMo's real markup", () => {
+  it("parses <function=read> with no </function>", () => {
+    const text =
+      '<tool_call><function=read><parameter=path>D:\\AgentsAI\\WEB AGENTS TO\\README.md</parameter></tool_call>';
+    const { calls, dropped } = parseToolCallsDetailed(text, opencodeOptions);
+    assert.equal(dropped.length, 0, JSON.stringify(dropped));
+    assert.equal(calls[0]!.name, "read");
+    assert.equal(calls[0]!.args.filePath, "D:\\AgentsAI\\WEB AGENTS TO\\README.md");
+  });
+
+  it("parses a tool name attribute with <parameter> children", () => {
+    const text = '<tool_call name=read><parameter=path>D:\\project\\src\\index.ts</parameter></tool_call>';
+    const { calls, dropped } = parseToolCallsDetailed(text, opencodeOptions);
+    assert.equal(dropped.length, 0, JSON.stringify(dropped));
+    assert.equal(calls[0]!.args.filePath, "D:\\project\\src\\index.ts");
+  });
+
+  it("parses <parameter name=\"...\"> children", () => {
+    const text = '<tool_call name="bash"><parameter name="command">npm test</parameter></tool_call>';
+    const { calls } = parseToolCallsDetailed(text, opencodeOptions);
+    assert.equal(calls[0]!.name, "bash");
+    assert.equal(calls[0]!.args.command, "npm test");
+  });
+
+  it("parses a name followed by <parameter> without the function tag", () => {
+    const text = '<tool_call>read<parameter=path>README.md</parameter></tool_call>';
+    const { calls } = parseToolCallsDetailed(text, opencodeOptions);
+    assert.equal(calls[0]!.args.filePath, "README.md");
+  });
+
+  it("uses the only declared parameter for a bare argument", () => {
+    const text = '<tool_call name="read">D:\\AgentsAI\\WEB AGENTS TO\\package.json</tool_call>';
+    const { calls } = parseToolCallsDetailed(text, opencodeOptions);
+    assert.equal(calls[0]!.args.filePath, "D:\\AgentsAI\\WEB AGENTS TO\\package.json");
+  });
+
+  it("maps opencode's short tool name onto the agent's long name", () => {
+    const local = {
+      allowedTools: ["bash", "read_file", "write_file", "replace_in_file"],
+      toolSchemas: {
+        read_file: { required: ["path"], properties: ["path", "offset", "limit"] },
+      },
+    };
+    const { calls, dropped } = parseToolCallsDetailed(
+      '<tool_call name="read">{"path":"README.md"}</tool_call>',
+      local
+    );
+    assert.equal(dropped.length, 0, JSON.stringify(dropped));
+    assert.equal(calls[0]!.name, "read_file");
+    assert.equal(calls[0]!.args.path, "README.md");
+  });
+
+  it("repairs unescaped Windows paths in JSON arguments", () => {
+    const text = String.raw`<tool_call name="read">{"filePath": "D:\AgentsAI\WEB AGENTS TO\package.json"}</tool_call>`;
+    const { calls, dropped } = parseToolCallsDetailed(text, opencodeOptions);
+    assert.equal(dropped.length, 0, JSON.stringify(dropped));
+    assert.equal(calls[0]!.name, "read");
+    assert.equal(calls[0]!.args.filePath, String.raw`D:\AgentsAI\WEB AGENTS TO\package.json`);
+  });
+
+  it("unwraps a parameter whose value repeats its own name", () => {
+    const text = String.raw`<tool_call><function=read><parameter=filePath>{"filePath": "D:\AgentsAI\WEB AGENTS TO\package.json"}</parameter></tool_call>`;
+    const { calls, dropped } = parseToolCallsDetailed(text, opencodeOptions);
+    assert.equal(dropped.length, 0, JSON.stringify(dropped));
+    assert.equal(calls[0]!.args.filePath, String.raw`D:\AgentsAI\WEB AGENTS TO\package.json`);
+  });
+
+  it("recovers a call whose closing tags were cut off", () => {
+    const text = "<function=glob><parameter=pattern>**/*.ts";
+    const { calls } = parseToolCallsDetailed(text, opencodeOptions);
+    assert.equal(calls[0]!.name, "glob");
+    assert.equal(calls[0]!.args.pattern, "**/*.ts");
+  });
+});
+
 describe("when the block really is unreadable", () => {
   it("reports the offending text instead of a bare (unknown)", () => {
     const text = `<tool_call>

@@ -423,13 +423,13 @@ export class BrowserChatProvider implements Provider {
         throw new ServerBusyError(`${this.id} reported: ${candidate.slice(0, 120)}`);
       }
 
-      // Nothing in the answer box yet: the page title often carries the banner
-      // ("server busy, try again later"), which is far better than waiting out
-      // the full timeout.
+      // Nothing in the answer box yet: the page title (and occasionally a toast)
+      // carries the banner ("server busy, try again later"), which is far better
+      // than waiting out the full timeout.
       if (!tracker.hasEmitted && !candidate.trim()) {
-        const title = await page.title().catch(() => "");
-        if (this.isBusy(title)) {
-          throw new ServerBusyError(`${this.id} page reports: ${title.trim().slice(0, 120)}`);
+        const busy = await this.detectBusyPage(page);
+        if (busy) {
+          throw new ServerBusyError(`${this.id} page reports: ${busy}`);
         }
       }
 
@@ -457,10 +457,11 @@ export class BrowserChatProvider implements Provider {
 
       const idleWithoutAnswer = Date.now() - startedAt > this.opts.streamStartTimeoutMs;
       if (!tracker.hasEmitted && stablePolls >= this.opts.streamIdlePolls && idleWithoutAnswer) {
+        const title = await page.title().catch(() => "");
         throw new ProviderError(
-          `${this.id} accepted the prompt but produced no answer`,
+          `${this.id} accepted the prompt but produced no answer (page title: "${title.trim() || "(none)"}")`,
           504,
-          "The site may have changed. Update the selectors via SITE_OVERRIDES or log in again."
+          'If the title mentions 服务器繁忙 / "busy", the free tier is rate-limited: wait a minute and send again. Otherwise run `WEB doctor --probe` to check the session and selectors.'
         );
       }
     }
@@ -827,6 +828,45 @@ export class BrowserChatProvider implements Provider {
 
   private isBusy(text: string): boolean {
     return looksBusy(text, this.busyPatterns);
+  }
+
+  /**
+   * A busy/rate-limit notice lives in the tab title or in a short-lived
+   * toast/banner. Never scan the whole page: MiMo keeps the conversation list
+   * in the DOM, so an old chat titled "Server Busy" made every request fail
+   * with provider_busy even though the model was answering normally.
+   */
+  private async detectBusyPage(page: Page): Promise<string | undefined> {
+    const title = await page.title().catch(() => "");
+    if (this.isBusy(title)) return title.trim().slice(0, 120);
+
+    const bannerSelectors = [
+      "[role='alert']",
+      "[role='status']",
+      "[class*='toast' i]",
+      "[class*='notification' i]",
+      "[class*='banner' i]",
+      "[class*='alert' i]",
+    ];
+    const viewportHeight = page.viewportSize()?.height ?? 900;
+
+    for (const selector of bannerSelectors) {
+      const loc = page.locator(selector);
+      const count = await loc.count().catch(() => 0);
+      for (let i = count - 1; i >= 0 && i >= count - 8; i--) {
+        const item = loc.nth(i);
+        if (!(await item.isVisible().catch(() => false))) continue;
+
+        // Banners sit near the top. Anything lower is chat history or the
+        // conversation sidebar, not a live notice.
+        const box = await item.boundingBox().catch(() => null);
+        if (!box || box.y < 0 || box.y > viewportHeight * 0.5) continue;
+
+        const text = (await item.innerText().catch(() => "")).trim();
+        if (this.isBusy(text)) return text.slice(0, 120);
+      }
+    }
+    return undefined;
   }
 
   private isRetryable(error: unknown): boolean {

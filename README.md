@@ -333,7 +333,7 @@ Copy `.env.example` to `.env`. The important ones:
 | `REQUEST_TIMEOUT_MS` | `180000` | Whole-request budget |
 | `STREAM_POLL_MS` | `250` | DOM polling interval |
 | `STREAM_IDLE_POLLS` | `6` | Unchanged polls that mean "done" |
-| `STREAM_START_TIMEOUT_MS` | `45000` | Give up if no answer starts |
+| `STREAM_START_TIMEOUT_MS` | `75000` | Give up if no answer starts |
 | `STREAM_MAX_WAIT_MS` | `180000` | Hard cap on one answer |
 | `PROVIDER_RETRIES` | `3` | Retries for "server busy"/transient failures |
 | `MAX_QUEUE` | `16` | Requests queued behind the active chat (then 429) |

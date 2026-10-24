@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.5.2
+
+Fixes found by driving a real MiMo session and opencode: tool calls that were
+recognised but executed with the wrong arguments, and a false "server busy".
+
+### Fixed
+- **MiMo's cut-off tool markup is executable.** `<function=read>` with no
+  `</function>` or `</parameter>`, `<tool_call name=read>` with XML
+  `<parameter>` children, a name followed by `<parameter>`, and a bare single
+  argument all map onto the declared tool schema.
+- **Windows paths no longer corrupt tool arguments.** MiMo writes
+  `D:\project\file.ts` inside JSON without escaping the backslashes, which is
+  invalid JSON. The parser now repairs path-looking strings, so `read` receives
+  `filePath` instead of the whole JSON object as a string.
+- **`provider_busy` from an old chat title.** Busy detection used to scan the
+  whole page; a sidebar conversation called "Server Busy" made every request
+  fail even though MiMo answered in seconds. Only the tab title and a visible
+  banner near the top of the viewport are trusted now.
+- **`(unknown): no tool name` and `arguments were not valid JSON`.** A broken
+  JSON object is reported instead of being turned into a bare command, and
+  opencode's short tool names (`read`) resolve to the agent's long ones
+  (`read_file`) when only the long form exists.
+- **Slow free-tier starts** get 75 seconds (`STREAM_START_TIMEOUT_MS`) instead
+  of 45, with the page title included in the timeout error.
+
+### Added
+- 12 more tests, including the exact MiMo markup and the HTTP/SSE translation
+  opencode consumes.
+
 ## 1.5.1
 
 Fixes from a real Windows session: broken tool calls, reasoning in the answer,

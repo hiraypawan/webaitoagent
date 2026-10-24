@@ -122,6 +122,84 @@ describe("streaming completions", () => {
     assert.deepEqual(JSON.parse(call.function.arguments), { command: "dir" });
   });
 
+  it("turns MiMo's <function=read> markup (no </function>) into tool_calls", async () => {
+    provider.chunks = [
+      String.raw`<tool_call><function=read><parameter=path>D:\AgentsAI\WEB AGENTS TO\README.md</parameter></tool_call>`,
+    ];
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: payload({
+        stream: true,
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "read",
+              parameters: {
+                type: "object",
+                properties: { filePath: { type: "string" } },
+                required: ["filePath"],
+              },
+            },
+          },
+        ],
+      }),
+    });
+
+    const frames = await sseFrames(response.body);
+    const call = frames.find((frame) => frame.choices?.[0]?.delta?.tool_calls)?.choices[0].delta
+      .tool_calls[0];
+    assert.ok(call, "expected a tool_calls frame");
+    assert.equal(call.function.name, "read");
+    assert.deepEqual(JSON.parse(call.function.arguments), {
+      filePath: String.raw`D:\AgentsAI\WEB AGENTS TO\README.md`,
+    });
+    assert.equal(frames.at(-1)!.choices[0].finish_reason, "tool_calls");
+
+    const leaked = frames.map((frame) => frame.choices?.[0]?.delta?.content ?? "").join("");
+    assert.doesNotMatch(leaked, /<tool_call|<parameter/);
+    provider.chunks = ["Hel", "lo"];
+  });
+
+  it("turns <tool_call name=read> with <parameter> children into tool_calls", async () => {
+    provider.chunks = [
+      String.raw`<tool_call name=read><parameter=path>D:\AgentsAI\WEB AGENTS TO\package.json</parameter></tool_call>`,
+    ];
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: payload({
+        stream: true,
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "read",
+              parameters: {
+                type: "object",
+                properties: { filePath: { type: "string" } },
+                required: ["filePath"],
+              },
+            },
+          },
+        ],
+      }),
+    });
+
+    const frames = await sseFrames(response.body);
+    const call = frames.find((frame) => frame.choices?.[0]?.delta?.tool_calls)?.choices[0].delta
+      .tool_calls[0];
+    assert.ok(call, "expected a tool_calls frame");
+    assert.equal(call.function.name, "read");
+    assert.deepEqual(JSON.parse(call.function.arguments), {
+      filePath: String.raw`D:\AgentsAI\WEB AGENTS TO\package.json`,
+    });
+    provider.chunks = ["Hel", "lo"];
+  });
+
   it("explains an unreadable tool block instead of answering with the failure", async () => {
     provider.chunks = ["<tool_call>\nI will list the files now.\n</tool_call>"];
     const response = await app.inject({
@@ -196,6 +274,39 @@ describe("non-streaming completions", () => {
     assert.equal(body.choices[0].finish_reason, "tool_calls");
     assert.equal(body.choices[0].message.content, null);
     assert.equal(body.choices[0].message.tool_calls[0].function.name, "bash");
+    provider.chunks = ["Hel", "lo"];
+  });
+
+  it("maps a bare MiMo argument onto the only declared parameter", async () => {
+    provider.chunks = [
+      String.raw`<tool_call name="read">D:\AgentsAI\WEB AGENTS TO\package.json</tool_call>`,
+    ];
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: payload({
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "read",
+              parameters: {
+                type: "object",
+                properties: { filePath: { type: "string" } },
+                required: ["filePath"],
+              },
+            },
+          },
+        ],
+      }),
+    });
+    const body = response.json();
+    assert.equal(body.choices[0].finish_reason, "tool_calls");
+    assert.equal(body.choices[0].message.tool_calls[0].function.name, "read");
+    assert.deepEqual(JSON.parse(body.choices[0].message.tool_calls[0].function.arguments), {
+      filePath: String.raw`D:\AgentsAI\WEB AGENTS TO\package.json`,
+    });
     provider.chunks = ["Hel", "lo"];
   });
 

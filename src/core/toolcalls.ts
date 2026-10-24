@@ -28,10 +28,14 @@ export interface ToolCallParseResult {
 
 /** Any `<tool_call ...>...</tool_call>` block, attributes or not. */
 const TOOL_BLOCK = /<tool_call\b([^>]*)>([\s\S]*?)<\/tool_call>/gi;
-/** `<function=NAME>...<parameter=KEY>VALUE</parameter></function>` (Qwen/GLM style). */
-const XML_FUNCTION = /<function\s*=\s*["']?([\w.-]+)["']?\s*>([\s\S]*?)<\/function>/gi;
+/** `<function=NAME>...</function>` or `<function name="NAME">...</function>` (Qwen/GLM style). */
+const XML_FUNCTION = /<function(?:\s*=\s*|\s+name\s*=\s*)["']?([\w.-]+)["']?\s*>([\s\S]*?)<\/function>/gi;
 /** A bare `<function=NAME>` block, without a `<tool_call>` wrapper. */
-const XML_FUNCTION_ANYWHERE = /<function\s*=\s*["']?([\w.-]+)["']?\s*>([\s\S]*?)<\/function>/gi;
+const XML_FUNCTION_ANYWHERE = /<function(?:\s*=\s*|\s+name\s*=\s*)["']?([\w.-]+)["']?\s*>([\s\S]*?)<\/function>/gi;
+/** `<function=NAME>` whose closing tag the model forgot. */
+const XML_FUNCTION_OPEN = /<function(?:\s*=\s*|\s+name\s*=\s*)["']?([\w.-]+)["']?\s*>([\s\S]*)$/i;
+/** `<parameter=KEY>VALUE` with or without `name=` and with or without a closing tag. */
+const XML_PARAMETER = /<parameter(?:\s+name\s*=\s*|\s*=\s*)["']?([\w.-]+)["']?\s*>([\s\S]*?)(?=<\/parameter>|<parameter(?:\s+name\s*=\s*|\s*=\s*)|<\/function|<\/tool_call|$)/gi;
 /** Misral/Devstral style: `[TOOL_CALLS] [{...}]`. */
 const TOOL_CALLS_TAG = /\[TOOL_CALLS\]\s*([\[{][\s\S]*?[\]}])(?=\s*$|\s*\n)/;
 /** `name` inside an attribute string. */
@@ -153,6 +157,23 @@ export function parseToolCallsDetailed(
       if (parsed) args = parsed;
     }
     if (!args) {
+      // Models often write the single argument bare:
+      // `<tool_call name="read">D:\project\README.md</tool_call>`. When the tool
+      // declares exactly one parameter, that text can only be that parameter.
+      const bare = raw.body.trim();
+      // A body that starts with `{`/`[` is meant to be JSON. If it did not
+      // parse, report it instead of turning the broken object into a path or
+      // command string.
+      if (bare && bare.length <= 4000 && !/[<>]/.test(bare) && !/^[\[{]/.test(bare)) {
+        const schema = options.toolSchemas?.[resolved];
+        const required = schema?.required ?? [];
+        const properties = schema?.properties ?? [];
+        const key =
+          required.length === 1 ? required[0] : properties.length === 1 ? properties[0] : undefined;
+        if (key) args = { [key]: bare };
+      }
+    }
+    if (!args) {
       dropped.push({
         name: resolved,
         args: {},
@@ -210,15 +231,34 @@ export function snippet(value: string, limit = 160): string {
 function xmlParameters(body: string): Record<string, unknown> | undefined {
   const params: Record<string, unknown> = {};
   let found = false;
-  const pattern = /<parameter\s*=\s*["']?([\w.-]+)["']?\s*>([\s\S]*?)<\/parameter>/gi;
-  for (const match of body.matchAll(pattern)) {
-    found = true;
+  XML_PARAMETER.lastIndex = 0;
+  for (const match of body.matchAll(XML_PARAMETER)) {
     const key = match[1]!.trim();
-    const raw = (match[2] ?? "").trim();
+    if (!key) continue;
+    found = true;
+    const raw = (match[2] ?? "").replace(/<\/?parameter[^>]*>/gi, "").trim();
     // Values may themselves be JSON (arrays, objects); keep them structured.
     const parsed = tryJson(raw);
-    params[key] = parsed === undefined ? raw : parsed;
+    if (parsed === undefined) {
+      params[key] = raw;
+    } else if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const object = parsed as Record<string, unknown>;
+      const keys = Object.keys(object);
+      // MiMo sometimes nests the argument inside its own name, or uses an
+      // alias (`path`) while the tool declares `filePath`:
+      // <parameter=filePath>{"filePath":"D:\\project\\file.ts"}</parameter>
+      const nestedKey =
+        keys.length === 1 ? keys[0]! : Object.prototype.hasOwnProperty.call(object, key) ? key : "";
+      const nested = nestedKey ? object[nestedKey] : undefined;
+      params[key] =
+        nested !== undefined && (nested === null || typeof nested !== "object")
+          ? nested
+          : parsed;
+    } else {
+      params[key] = parsed;
+    }
   }
+  XML_PARAMETER.lastIndex = 0;
   return found ? params : undefined;
 }
 
@@ -252,6 +292,19 @@ function collectRawCalls(text: string, options: ParseToolCallsOptions): RawCall[
       continue;
     }
 
+    // Same shape, but the model forgot `</function>` and went straight to
+    // `</tool_call>`. MiMo does this often; the parameters are still usable.
+    const openXml = XML_FUNCTION_OPEN.exec(body);
+    if (openXml && /<parameter\b/i.test(body)) {
+      raws.push({
+        name: openXml[1]!.trim(),
+        body: openXml[2] ?? "",
+        raw,
+        args: xmlParameters(openXml[2] ?? "") ?? {},
+      });
+      continue;
+    }
+
     const attrName = ATTR_NAME.exec(attrs)?.[1];
     const parsed = jsonToolCalls(body);
     if (parsed.length > 0) {
@@ -263,7 +316,21 @@ function collectRawCalls(text: string, options: ParseToolCallsOptions): RawCall[
     }
 
     if (attrName) {
-      raws.push({ name: attrName, body, raw });
+      // `<tool_call name="read"><parameter=path>...</parameter></tool_call>`
+      const xmlArgs = xmlParameters(body);
+      raws.push({ name: attrName, body, raw, ...(xmlArgs ? { args: xmlArgs } : {}) });
+      continue;
+    }
+
+    // `<tool_call>read<parameter=path>...</parameter></tool_call>`
+    const nameThenParams = /^([\w.-]+)\s*(?=<parameter\b)/i.exec(body);
+    if (nameThenParams) {
+      raws.push({
+        name: nameThenParams[1]!.trim(),
+        body,
+        raw,
+        args: xmlParameters(body) ?? {},
+      });
       continue;
     }
 
@@ -287,6 +354,21 @@ function collectRawCalls(text: string, options: ParseToolCallsOptions): RawCall[
       raw: match[0],
       args: xmlParameters(match[2] ?? "") ?? {},
     });
+  }
+
+  // Last resort: `<function=glob><parameter=pattern>**/*.ts` with every closing
+  // tag missing. MiMo does this when it is cut off mid-call.
+  if (raws.length === 0) {
+    XML_FUNCTION_OPEN.lastIndex = 0;
+    const open = XML_FUNCTION_OPEN.exec(text);
+    if (open && /<parameter\b/i.test(open[2] ?? "")) {
+      raws.push({
+        name: open[1]!.trim(),
+        body: open[2] ?? "",
+        raw: open[0],
+        args: xmlParameters(open[2] ?? "") ?? {},
+      });
+    }
   }
 
   // `[TOOL_CALLS] [...]`
@@ -321,6 +403,15 @@ function resolveToolName(name: string, options: ParseToolCallsOptions): string |
   if (alias) {
     const target = allowed.find((tool) => tool.toLowerCase() === alias.toLowerCase());
     if (target) return target;
+  }
+
+  // The table above points at opencode's short names. The local WEB agent uses
+  // the long ones (`read_file`, `replace_in_file`), so resolve the reverse too:
+  // a model that writes `read` should still hit `read_file`.
+  for (const [source, target] of Object.entries(aliases)) {
+    if (target.toLowerCase() !== requested.toLowerCase()) continue;
+    const match = allowed.find((tool) => tool.toLowerCase() === source.toLowerCase());
+    if (match) return match;
   }
 
   return undefined;
@@ -526,6 +617,40 @@ function tryParseObject(value: string): Record<string, unknown> | undefined {
   return undefined;
 }
 
+/**
+ * Escape backslashes inside JSON string literals that contain a Windows path.
+ *
+ * Models write `D:\project\file.ts` without doubling the separators, which is
+ * invalid JSON (`\p`, `\A`, and even `\t` in `D:\temp`). The drive letter makes
+ * the intent unambiguous, so only path-looking strings are rewritten; normal
+ * `\n` escapes in prose are left alone.
+ */
+function escapeWindowsPaths(text: string): string {
+  return text.replace(/"(?:[^"\\]|\\.)*"/g, (literal) => {
+    const inner = literal.slice(1, -1);
+    if (!/[A-Za-z]:\\|^\\\\/.test(inner)) return literal;
+
+    let out = "";
+    for (let i = 0; i < inner.length; i++) {
+      const char = inner[i]!;
+      if (char !== "\\") {
+        out += char;
+        continue;
+      }
+      const next = inner[i + 1];
+      if (next === "\\" || next === '"') {
+        // Already a valid escape; keep the pair as written.
+        out += char + next;
+        i++;
+      } else {
+        // A literal Windows separator (or a trailing backslash).
+        out += "\\\\";
+      }
+    }
+    return `"${out}"`;
+  });
+}
+
 /** Fix the usual model-authored JSON mistakes. */
 export function repairJson(input: string): string {
   let text = input.trim();
@@ -546,6 +671,11 @@ export function repairJson(input: string): string {
 
   // Single-quoted strings: only safe when the payload uses no double quotes.
   if (!text.includes('"') && text.includes("'")) text = text.replace(/'/g, '"');
+
+  // Windows paths (`D:\project\file.ts`) are not valid JSON until the
+  // separators are doubled. Run after quote normalization so single-quoted
+  // payloads are covered too.
+  text = escapeWindowsPaths(text);
 
   // Unquoted keys: {"a":1} style fallout, e.g. {a: 1}
   text = text.replace(/([{,]\s*)([A-Za-z_][\w-]*)(\s*:)/gu, '$1"$2"$3');
@@ -579,7 +709,7 @@ export function stripToolCalls(text: string): string {
 }
 
 export function hasToolCalls(text: string): boolean {
-  return /<tool_call[\s>]|<function\s*=|\[TOOL_CALLS\]/i.test(text);
+  return /<tool_call[\s>]|<function\s*=|<function\s+name\s*=|\[TOOL_CALLS\]/i.test(text);
 }
 
 /** Convert parsed text-protocol calls into OpenAI `tool_calls`. */
