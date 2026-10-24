@@ -71,6 +71,12 @@ export const config = {
   mimoUser: optionalStr("MIMO_USER"),
   mimoPass: optionalStr("MIMO_PASS"),
 
+  // Login (MiMo uses email + password + a one-time code)
+  /** How long `WEB login` waits for sign-in to complete before giving up. */
+  loginTimeoutMs: int("LOGIN_TIMEOUT_MS", 300_000, 10_000),
+  /** Cooldown before another automatic password attempt (lockout protection). */
+  loginCooldownMs: int("LOGIN_COOLDOWN_MS", 900_000, 0),
+
   // Provider behaviour
   requestTimeoutMs: int("REQUEST_TIMEOUT_MS", 180_000, 1_000),
   streamPollMs: int("STREAM_POLL_MS", 250, 50),

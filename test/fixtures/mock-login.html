@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Mock Sign In</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 40px; }
+      form { display: grid; gap: 8px; max-width: 320px; }
+      input, button { padding: 8px; font: inherit; }
+      .hidden { display: none; }
+      #chat { margin-top: 24px; }
+    </style>
+  </head>
+  <body>
+    <h1>Mock provider</h1>
+
+    <!-- Signed-in view -->
+    <section id="chat" class="hidden">
+      <p>Signed in.</p>
+      <textarea id="prompt" rows="2" cols="40"></textarea>
+      <button id="send">Send</button>
+      <div class="markdown-prose"></div>
+    </section>
+
+    <!-- Step 1: email + password -->
+    <form id="credentials">
+      <label>Email <input name="account" type="text" autocomplete="username" /></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" /></label>
+      <label><input type="checkbox" /> Remember me</label>
+      <button type="submit">Sign in</button>
+    </form>
+
+    <!-- Step 2: one-time code -->
+    <form id="otp" class="hidden">
+      <p>Enter the verification code we sent to your email.</p>
+      <label>Code <input name="code" autocomplete="one-time-code" inputmode="numeric" /></label>
+      <button type="submit">Verify</button>
+    </form>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const showOnly = (id) => {
+        for (const section of ["chat", "credentials", "otp"]) {
+          $(section).classList.toggle("hidden", section !== id);
+        }
+      };
+
+      // The harness submits a real form; each submission is counted server-side
+      // so tests can prove we do not hammer the provider with password attempts.
+      $("credentials").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const body = new FormData($("credentials"));
+        await fetch("/login", { method: "POST", body });
+        showOnly("otp");
+      });
+
+      $("otp").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const body = new FormData($("otp"));
+        await fetch("/verify", { method: "POST", body });
+        location.reload();
+      });
+
+      $("send").addEventListener("click", () => {
+        $("prompt").value = "";
+        const answer = document.querySelector(".markdown-prose");
+        answer.textContent = "hello from the mock";
+      });
+
+      // Server decides which stage to render.
+      if (document.cookie.includes("session=1")) showOnly("chat");
+      else showOnly("credentials");
+    </script>
+  </body>
+</html>

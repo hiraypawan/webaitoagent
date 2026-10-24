@@ -85,6 +85,8 @@ before(async () => {
 
 after(async () => {
   await manager?.close().catch(() => {});
+  // Chromium holds keep-alive sockets open; without this, close() never calls back.
+  server?.closeAllConnections?.();
   await new Promise<void>((resolve) => server?.close(() => resolve()));
   if (profileRoot) fs.rmSync(profileRoot, { recursive: true, force: true });
 });
@@ -236,5 +238,154 @@ describe("browser provider against a mock chat UI", () => {
     assert.match(b.text, /ECHO: beta/);
     assert.doesNotMatch(a.text, /beta/);
     assert.doesNotMatch(b.text, /alpha/);
+  });
+});
+
+/**
+ * Login flow against a mock that behaves like MiMo: email+password, then a
+ * one-time code. Proves three things with a real browser:
+ *   1. the OTP step is detected (not reported as "wrong password"),
+ *   2. the automatic password attempt happens at most once (lockout safety),
+ *   3. a completed login is recognised and the session is reused.
+ */
+describe("login flow with an OTP step", () => {
+  let loginServer: http.Server;
+  let loginPort = 0;
+  let attempts = 0;
+  let profileDir = "";
+
+  const loginPage = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "fixtures",
+    "mock-login.html"
+  );
+
+  before(async () => {
+    const html = fs.readFileSync(loginPage, "utf8");
+    loginServer = http.createServer((request, response) => {
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (request.method === "POST" && url.pathname === "/login") {
+        attempts += 1;
+        request.resume();
+        request.on("end", () => {
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ otp: true }));
+        });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/verify") {
+        request.resume();
+        request.on("end", () => {
+          response.writeHead(200, {
+            "Content-Type": "application/json",
+            "Set-Cookie": "session=1; Path=/; Max-Age=86400",
+          });
+          response.end(JSON.stringify({ ok: true }));
+        });
+        return;
+      }
+      if (url.pathname === "/stats") {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ attempts }));
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      response.end(html);
+    });
+    await new Promise<void>((resolve) => loginServer.listen(0, "127.0.0.1", resolve));
+    loginPort = (loginServer.address() as { port: number }).port;
+    profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "wat-login-profile-"));
+  });
+
+  after(async () => {
+    loginServer?.closeAllConnections?.();
+    await new Promise<void>((resolve) => loginServer?.close(() => resolve()));
+    if (profileDir) fs.rmSync(profileDir, { recursive: true, force: true });
+  });
+
+  function makeProvider(loginManager: PlaywrightBrowserManager) {
+    const base = `http://127.0.0.1:${loginPort}/`;
+    return new BrowserChatProvider(
+      {
+        ...site,
+        id: "mock-login",
+        baseUrl: base,
+        chatUrls: [base],
+        loginUrl: base,
+        usernameSelector: "input[name='account']",
+        passwordSelector: "input[name='password']",
+        loginButtonSelector: "button[type='submit']",
+        credentials: { user: "someone@example.com", pass: "not-a-real-password" },
+      },
+      loginManager,
+      { streamPollMs: 60, streamIdlePolls: 4, retries: 1, requestTimeoutMs: 20_000 }
+    );
+  }
+
+  async function chatOnce(target: BrowserChatProvider) {
+    for await (const _chunk of target.chat({
+      model: "mock-1",
+      messages: [{ role: "user", content: "hi" }],
+    })) {
+      // drain
+    }
+  }
+
+  it("stops at the one-time code and does not retry the password", async (t) => {
+    if (!available) return t.skip("no chromium available");
+
+    const guardManager = new PlaywrightBrowserManager({
+      userDataRoot: profileDir,
+      headless: true,
+      executablePath,
+    });
+    const target = makeProvider(guardManager);
+
+    await assert.rejects(chatOnce(target), (error: Error & { hint?: string }) => {
+      const detail = `${error.message}\n${error.hint ?? ""}`;
+      assert.match(detail, /one-time code|verification/i, `unexpected error: ${detail}`);
+      assert.match(detail, /WEB login/);
+      return true;
+    });
+    assert.equal(attempts, 1, "exactly one password submission");
+
+    // Second request: the guard must block another password attempt.
+    await assert.rejects(chatOnce(target));
+    assert.equal(attempts, 1, "the guard prevents repeated password attempts");
+
+    const state = JSON.parse(fs.readFileSync(path.join(profileDir, "login-state.json"), "utf8"));
+    assert.equal(state["mock-login"].lastFailureReason, "verification_required");
+
+    await guardManager.close();
+  });
+
+  it("recognises a session that is already signed in", async (t) => {
+    if (!available) return t.skip("no chromium available");
+
+    const signedInDir = fs.mkdtempSync(path.join(os.tmpdir(), "wat-signed-in-"));
+    const signedInManager = new PlaywrightBrowserManager({
+      userDataRoot: signedInDir,
+      headless: true,
+      executablePath,
+    });
+
+    // Seed the session cookie exactly as the verify endpoint would.
+    const ctx = await signedInManager.context("mock-login");
+    await ctx.addCookies([
+      {
+        name: "session",
+        value: "1",
+        url: `http://127.0.0.1:${loginPort}/`,
+      },
+    ]);
+
+    const target = makeProvider(signedInManager);
+    const probe = await target.probeSession();
+    assert.equal(probe.signedIn, true, `state was ${probe.loginState}`);
+    assert.equal(probe.needsLogin, false);
+    assert.equal(probe.cookies?.hasAuthCookie, true);
+
+    await signedInManager.close();
+    fs.rmSync(signedInDir, { recursive: true, force: true });
   });
 });

@@ -135,7 +135,12 @@ export async function createServer(options: ServerOptions = {}): Promise<BuiltSe
     ok: true,
     version: VERSION,
     headless: options.headless ?? config.headless,
-    providers: await Promise.all(providers.map((provider) => provider.status?.())),
+    providers: await Promise.all(
+      providers.map(async (provider) => ({
+        ...(provider.status?.() ?? {}),
+        session: await Promise.resolve(provider.session?.()).catch(() => undefined),
+      }))
+    ),
   }));
 
   app.get("/v1/models", async () => {
@@ -212,6 +217,29 @@ export async function createServer(options: ServerOptions = {}): Promise<BuiltSe
       provider: providerId,
       message: `Opened a browser for ${providerId}. Sign in, then close the window.`,
     });
+  });
+
+  /**
+   * Session health. Without `probe` this never starts a browser — it reports
+   * cookie lifetime and whether the last automatic login was abandoned.
+   */
+  app.get("/auth/session", async (request) => {
+    const query = request.query as { provider?: string; probe?: string };
+    const provider = providerMap.get(query.provider ?? providers[0]!.id);
+    if (!provider) throw new ValidationError(`provider "${query.provider}" not found`);
+
+    const wantProbe = query.probe === "1" || query.probe === "true";
+    if (wantProbe) {
+      if (!provider.probeSession) throw new ValidationError("provider does not support probing");
+      return { ok: true, provider: provider.id, probe: true, session: await provider.probeSession() };
+    }
+
+    return {
+      ok: true,
+      provider: provider.id,
+      probe: false,
+      session: (await provider.session?.()) ?? { checked: false },
+    };
   });
 
   app.post("/auth/logout", async (request) => {

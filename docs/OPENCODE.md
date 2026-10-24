@@ -106,7 +106,10 @@ Text is streamed as it appears, with a small hold-back buffer so a
 | `404` / `Not Found` on chat | `baseURL` missing `/v1` | `http://127.0.0.1:8787/v1` |
 | `401 invalid api key` | `apiKey` ≠ server `API_KEY` | Make them match, or clear `API_KEY` in `.env` |
 | `unknown model` | Model id typo | Use an id from `WEB models` (`mimo/mimo-v2.6-pro` or the bare `mimo-v2.6-pro`) |
-| `login_required` | Not signed in to the provider | `WEB login`, sign in, close the window |
+| `login_required` | Not signed in to the provider | `WEB login`, complete email + password + one-time code (the window closes itself) |
+| Error mentions a **one-time code** | The provider wants OTP; automation cannot supply it | Finish `WEB login` by hand — this is expected, not a bug |
+| Worked yesterday, now `login_required` | Session expired | `WEB doctor --probe` to confirm, then `WEB login` |
+| Automatic login keeps being skipped | Cooldown after a failed attempt (`LOGIN_COOLDOWN_MS`) | Wait, or log in manually once |
 | "tool call failed" on a specific tool | Arguments did not fit the schema | Usually retryable; the model gets a note and tries again |
 | Turns take 60–120 s | The model runs in a browser | Lower `limit.output`, ask for smaller steps |
 | Second opencode window hangs / both stall | One conversation per provider | Run one agent at a time; `MAX_QUEUE` only queues, it doesn't add parallelism |
