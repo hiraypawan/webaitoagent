@@ -158,7 +158,21 @@ itself, a persisted attempt guard, and `/auth/session` + `WEB doctor --probe` so
 a dead session is visible before an agent run. Auto-login can only pre-fill and
 is rate limited; it can never complete a login, and it no longer retries.
 
-**3. ToS risk on session replay: not answered.** P1 stays blocked until it is.
+**3. Session replay: declined for now (decided 2026-10-24).**
+
+In plain terms: session replay means talking to MiMo's *private* endpoint the
+way the website does, instead of typing into the page. It would be faster, but it
+is closer to "pretending to be the website" — more likely to break, and more
+likely to get the account in trouble. The owner asked for whatever best serves
+the goal (a working free coding agent) rather than a technical trade-off, so:
+
+- **Keep the current approach** (drive the real page). It is slower but honest,
+  and it is the only route that keeps working with just a normal login.
+- **P1 is not being built.** Revisit only if the site changes and the page
+  automation stops working for good.
+- **P2 (hardening) is the priority instead**: fewer failures, clearer recovery,
+  and the setup wizard + plain-English help so nothing depends on knowing how it
+  works inside.
 
 Consequence: with P0 removed, **P1 (replaying the site's own chat endpoint with
 the saved session) is the only remaining way to get real token streaming and to

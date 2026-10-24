@@ -23,14 +23,29 @@ aistudio.xiaomimimo.com  →  MiMo V2.6 Pro
 
 ## Quick start
 
-Requirements: **Node.js 20.3+**, and a Chromium that Playwright can drive.
-
 ```bash
 npm install
 npx playwright install chromium   # one-time browser download
-cp .env.example .env              # optional, then edit
-npm run dev                       # API on http://127.0.0.1:8787
+WEB setup                         # checks everything, writes opencode.json
+WEB login                         # email + password + the one-time code
+opencode                          # in your project folder
 ```
+
+`WEB setup` is the friendly path: it verifies Node and the browser, starts the
+server, tells you whether you are signed in, and writes a correct `opencode.json`
+into the folder you run it from. Plain-English troubleshooting lives in
+[`docs/HELP.md`](docs/HELP.md).
+
+Requirements: **Node.js 20.3+**, and a Chromium that Playwright can drive.
+
+<details>
+<summary>Manual equivalent</summary>
+
+```bash
+cp .env.example .env   # optional, then edit
+npm run dev            # API on http://127.0.0.1:8787
+```
+</details>
 
 ### 1. Sign in once
 
@@ -181,7 +196,8 @@ schema checks) plus a troubleshooting table live in
 | `WEB chat "prompt"` | One-shot chat (`--json` for machine output) |
 | `WEB start` | Server only |
 | `WEB models` | List models |
-| `WEB doctor [--chat]` | Diagnose API/auth/models and print the opencode config |
+| `WEB setup [--dir <project>]` | One-command first-time setup + writes `opencode.json` |
+| `WEB doctor [--chat] [--probe]` | Diagnose API/auth/session and print the opencode config |
 | `WEB login` / `WEB logout` | Manage the provider session |
 | `WEB version` | Version |
 
@@ -295,6 +311,7 @@ found three real defects through it; see [`docs/AUDIT.md`](docs/AUDIT.md).
 | `docs/ARCHITECTURE.md` | Design and data flow |
 | `docs/OPENCODE.md` | opencode setup, wire contract, troubleshooting |
 | `docs/AUDIT.md` | Audit findings, fixes and what could not be verified |
+| `docs/HELP.md` | Plain-English troubleshooting ("if it breaks, do this") |
 | `docs/PLAN.md` | Roadmap: official MiMo API, session replay, hardening |
 
 ## Known limitations

@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.3.1
+
+Made usable without reading the whole README.
+
+### Added
+- **`WEB setup`** — one command that checks Node and the browser, starts the
+  server, reports sign-in state in plain language, and writes a correct
+  `opencode.json` (with `tool_call: true`) into the current or `--dir` folder.
+  Never overwrites an existing config unless `--force`; `--no-write` just prints it.
+- **`docs/HELP.md`** — plain-English troubleshooting: symptom, what it means,
+  what to type. Covers expired sessions, OTP, "opencode never uses tools",
+  401/404/unknown-model, slow steps, queue limits and how to start clean.
+- 10 tests for the setup pieces (config shape, no-clobber writing, session
+  wording, step rendering).
+
+### Changed
+- README quick start now leads with `WEB setup`.
+- `docs/PLAN.md`: session replay (P1) is declined — the current page-driven
+  approach stays, and hardening is the priority.
+
+
 ## 1.3.0
 
 Login/session handling for the real MiMo flow (**email + password + one-time
