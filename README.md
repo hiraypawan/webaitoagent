@@ -276,6 +276,7 @@ found three real defects through it; see [`docs/AUDIT.md`](docs/AUDIT.md).
 | `docs/ARCHITECTURE.md` | Design and data flow |
 | `docs/OPENCODE.md` | opencode setup, wire contract, troubleshooting |
 | `docs/AUDIT.md` | Audit findings, fixes and what could not be verified |
+| `docs/PLAN.md` | Roadmap: official MiMo API, session replay, hardening |
 
 ## Known limitations
 
