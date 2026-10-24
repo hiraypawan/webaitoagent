@@ -59,6 +59,21 @@ WEB setup --force
 
 ---
 
+## The agent's commands fail: "is not recognized as an internal or external command"
+
+That is Windows' `cmd.exe` refusing a Unix command (`ls`, `cat`, `grep`).
+
+1. Check what it picked: `WEB doctor` → look for **Shell for the coding agent**.
+2. Best fix: install Git for Windows (git-scm.com) — the agent then uses real bash.
+3. Nothing to install? It already works around this: simple `ls`/`cat`/`mkdir`/`rm`
+   commands run in a built-in interpreter, and the model is told to use the
+   dedicated tools (list_dir, glob, grep, read_file, …) otherwise.
+
+To force a shell: `set AGENT_SHELL=powershell` before starting `npm run dev`
+(or `AGENT_SHELL=bash`). Per command the model can also pass `"shell": "cmd"`.
+
+---
+
 ## "connection refused" / opencode cannot reach the model
 
 The little local server is not running. Start it and leave that window open:

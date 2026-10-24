@@ -201,7 +201,37 @@ schema checks) plus a troubleshooting table live in
 | `WEB login` / `WEB logout` | Manage the provider session |
 | `WEB version` | Version |
 
-The agent has `bash`, `read_file`, `write_file`, `replace_in_file` and `list_dir`. **Destructive actions ask for confirmation**; pass `--yes` (or `AGENT_AUTO_APPROVE=true`) for scripts. Tools are confined to the workspace root unless `AGENT_ALLOW_OUTSIDE=true`.
+### Tools
+
+| Tool | Works without a shell |
+|---|---|
+| `read_file` · `write_file` · `append_file` · `replace_in_file` | yes |
+| `list_dir` · `glob` · `grep` | yes |
+| `make_dir` · `move_file` · `copy_file` · `delete_file` | yes |
+| `bash` | uses the best shell available |
+
+**Destructive actions ask for confirmation**; pass `--yes` (or `AGENT_AUTO_APPROVE=true`) for scripts. Tools are confined to the workspace root unless `AGENT_ALLOW_OUTSIDE=true`.
+
+### Shells (Windows included)
+
+`bash` used to hard-code `cmd.exe` on Windows, so `ls`, `grep`, `cat` and `&&`
+chains failed with *"is not recognized"*. Now the shell is chosen per machine:
+
+| Priority | Shell | Notes |
+|---|---|---|
+| 1 | **Git Bash** | `C:\Program Files\Git\bin\bash.exe` or `bash` on PATH |
+| 2 | **PowerShell 7** (`pwsh`) | then Windows PowerShell 5 |
+| 3 | **cmd.exe** | last resort |
+
+On Linux/macOS it uses `$SHELL` (bash/zsh/sh). Force one with `AGENT_SHELL=bash|powershell|cmd|sh`, and per call with `{"command": "...", "shell": "powershell", "cwd": "src"}`.
+
+Three safety nets:
+
+1. **If the chosen shell is missing**, the command is retried with the next one instead of failing.
+2. **If the shell does not know a command** (`'ls' is not recognized...`), simple commands — `ls`, `cat`, `echo`, `pwd`, `mkdir -p`, `rm -r`, `cp`, `mv`, `touch`, `head`, `tail`, `wc` — run in a built-in interpreter, and the result says so.
+3. **For everything else** the model is told to use the dedicated tools above (or native `dir`/`Get-ChildItem` syntax) instead of guessing.
+
+`WEB doctor` prints which shell was picked.
 
 ---
 
